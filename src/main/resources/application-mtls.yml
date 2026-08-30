@@ -1,0 +1,11 @@
+server:
+  ssl:
+    enabled: true
+    key-store: ${NETA_TLS_KEY_STORE}
+    key-store-password: ${NETA_TLS_KEY_STORE_PASSWORD}
+    key-store-type: ${NETA_TLS_KEY_STORE_TYPE:PKCS12}
+    trust-store: ${NETA_TLS_TRUST_STORE}
+    trust-store-password: ${NETA_TLS_TRUST_STORE_PASSWORD}
+    trust-store-type: ${NETA_TLS_TRUST_STORE_TYPE:PKCS12}
+    client-auth: want
+    enabled-protocols: TLSv1.3

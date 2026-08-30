@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: neta-coordinator
+  datasource:
+    url: ${NETA_DB_URL:jdbc:postgresql://localhost:5432/neta_coordinator}
+    username: ${NETA_DB_USER:neta}
+    password: ${NETA_DB_PASSWORD:neta-dev-only}
+  flyway:
+    enabled: true
+server:
+  port: ${NETA_PORT:8080}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+neta:
+  fleet-id: ${NETA_FLEET_ID:fleet-dev}
+  bootstrap-enrollment-token: ${NETA_BOOTSTRAP_ENROLLMENT_TOKEN:}
+  bootstrap-token-ttl: ${NETA_BOOTSTRAP_TOKEN_TTL:PT24H}
+  security:
+    require-client-certificate: ${NETA_REQUIRE_CLIENT_CERTIFICATE:true}
+    max-clock-skew: ${NETA_MAX_CLOCK_SKEW:PT2M}
+    max-message-lifetime: ${NETA_MAX_MESSAGE_LIFETIME:PT15M}
