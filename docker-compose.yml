@@ -42,11 +42,14 @@ services:
       retries: 20
       start_period: 20s
     networks:
+      - neta-edge
       - neta-internal
 
 volumes:
   neta-postgres:
 
 networks:
+  neta-edge:
+    driver: bridge
   neta-internal:
     internal: true
