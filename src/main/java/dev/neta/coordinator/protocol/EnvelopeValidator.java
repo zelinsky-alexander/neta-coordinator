@@ -5,6 +5,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.EnumSet;
 import java.util.Set;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -15,6 +16,7 @@ public final class EnvelopeValidator {
     private final CoordinatorProperties properties;
     private final Clock clock;
 
+    @Autowired
     public EnvelopeValidator(CoordinatorProperties properties) { this(properties, Clock.systemUTC()); }
     EnvelopeValidator(CoordinatorProperties properties, Clock clock) { this.properties = properties; this.clock = clock; }
 
