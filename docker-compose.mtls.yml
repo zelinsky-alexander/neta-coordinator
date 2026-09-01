@@ -1,0 +1,24 @@
+services:
+  coordinator:
+    environment:
+      SPRING_PROFILES_ACTIVE: mtls
+      NETA_REQUIRE_CLIENT_CERTIFICATE: "true"
+      NETA_TLS_KEY_STORE: /run/neta/tls/coordinator.p12
+      NETA_TLS_KEY_STORE_PASSWORD: ${NETA_TLS_KEY_STORE_PASSWORD:?NETA_TLS_KEY_STORE_PASSWORD is required}
+      NETA_TLS_TRUST_STORE: /run/neta/tls/fleet-trust.p12
+      NETA_TLS_TRUST_STORE_PASSWORD: ${NETA_TLS_TRUST_STORE_PASSWORD:?NETA_TLS_TRUST_STORE_PASSWORD is required}
+      NETA_ENROLLMENT_ISSUER_KEY_STORE: /run/neta/tls/agent-issuer.p12
+      NETA_ENROLLMENT_ISSUER_KEY_STORE_PASSWORD: ${NETA_ENROLLMENT_ISSUER_KEY_STORE_PASSWORD:?NETA_ENROLLMENT_ISSUER_KEY_STORE_PASSWORD is required}
+      NETA_ENROLLMENT_ISSUER_KEY_ALIAS: neta-agent-issuer
+      NETA_FLEET_CA_FILE: /run/neta/tls/fleet-ca.crt
+    volumes:
+      - ./deploy/certs/coordinator.p12:/run/neta/tls/coordinator.p12:ro
+      - ./deploy/certs/fleet-trust.p12:/run/neta/tls/fleet-trust.p12:ro
+      - ./deploy/certs/agent-issuer.p12:/run/neta/tls/agent-issuer.p12:ro
+      - ./deploy/certs/fleet-ca.crt:/run/neta/tls/fleet-ca.crt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://127.0.0.1:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
