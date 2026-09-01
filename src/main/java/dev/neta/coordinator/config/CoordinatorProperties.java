@@ -11,6 +11,11 @@ public record CoordinatorProperties(
         Enrollment enrollment,
         Security security) {
 
+    public CoordinatorProperties(String fleetId, String bootstrapEnrollmentToken,
+                                 Duration bootstrapTokenTtl, Security security) {
+        this(fleetId, bootstrapEnrollmentToken, bootstrapTokenTtl, null, security);
+    }
+
     public CoordinatorProperties {
         if (fleetId == null || fleetId.isBlank()) fleetId = "fleet-dev";
         if (bootstrapTokenTtl == null) bootstrapTokenTtl = Duration.ofHours(24);
