@@ -100,19 +100,21 @@ public class MessageIngestService {
                         nullSafe(text(p, "trust_verdict"));
             }
 
-            // V2 initially backfilled pre-MS4.1 rows with finding_key=finding_id. If the same
-            // historical finding is announced again by an upgraded agent, adopt the new semantic
-            // key before the normal (agent_id,finding_key) upsert so the existing row is preserved.
+            // Upgrade compatibility: pre-MS4.1 and early-MS4.1 rows may already have this
+            // finding_id with either a backfilled or coordinator-fallback key. If an upgraded
+            // agent supplies the semantic key, let the existing row adopt it before the normal
+            // (agent_id,finding_key) upsert. The NOT EXISTS guard prevents stealing a key that
+            // already belongs to another logical finding for the same agent.
             jdbc.update("""
                     UPDATE findings
                     SET finding_key=?
-                    WHERE agent_id=? AND finding_id=? AND finding_key=finding_id
+                    WHERE agent_id=? AND finding_id=? AND finding_key<>?
                       AND NOT EXISTS (
                           SELECT 1 FROM findings other
                           WHERE other.agent_id=? AND other.finding_key=? AND other.finding_id<>?
                       )
                     """,
-                    findingKey, e.agentId(), findingId,
+                    findingKey, e.agentId(), findingId, findingKey,
                     e.agentId(), findingKey, findingId);
 
             jdbc.update("""
