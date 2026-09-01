@@ -23,9 +23,14 @@ public class EnrollmentService implements ApplicationRunner {
     private final JdbcTemplate jdbc;
     private final CoordinatorProperties properties;
     private final ObjectMapper mapper;
+    private final CertificateIssuer certificateIssuer;
 
-    public EnrollmentService(JdbcTemplate jdbc, CoordinatorProperties properties, ObjectMapper mapper) {
-        this.jdbc = jdbc; this.properties = properties; this.mapper = mapper;
+    public EnrollmentService(JdbcTemplate jdbc, CoordinatorProperties properties, ObjectMapper mapper,
+                             CertificateIssuer certificateIssuer) {
+        this.jdbc = jdbc;
+        this.properties = properties;
+        this.mapper = mapper;
+        this.certificateIssuer = certificateIssuer;
     }
 
     @Override public void run(ApplicationArguments args) {
@@ -37,18 +42,35 @@ public class EnrollmentService implements ApplicationRunner {
 
     @Transactional
     public EnrollmentResponse enroll(EnrollmentRequest request) {
+        if (request == null) throw ProtocolException.badRequest("enrollment request is required");
         if (!properties.fleetId().equals(request.fleetId())) throw ProtocolException.unauthorized("fleet is not authorized");
         String tokenHash = tokenHash(request.token());
         var rows = jdbc.query("SELECT token_id FROM enrollment_tokens WHERE fleet_id=? AND token_hash=? AND consumed_at IS NULL AND expires_at>now() FOR UPDATE",
                 (rs, rowNum) -> rs.getObject("token_id", UUID.class), request.fleetId(), tokenHash);
         if (rows.size() != 1) throw ProtocolException.unauthorized("invalid or expired enrollment token");
-        String fingerprint = normalizeFingerprint(request.certificateSha256());
+
         String agentId = "AGENT-" + UUID.randomUUID();
+        var issued = certificateIssuer.issue(agentId, request.csrPem());
+        String displayName = request.displayName() == null || request.displayName().isBlank() ? agentId : request.displayName().trim();
+
         jdbc.update("INSERT INTO agents(agent_id,fleet_id,display_name,certificate_sha256,status) VALUES (?,?,?,?, 'ACTIVE')",
-                agentId, request.fleetId(), request.displayName(), fingerprint);
+                agentId, request.fleetId(), displayName, issued.certificateSha256());
         jdbc.update("UPDATE enrollment_tokens SET consumed_at=now(), consumed_by_agent_id=? WHERE token_id=?", agentId, rows.getFirst());
-        audit("AGENT_ENROLLED", agentId, Map.of("fleet_id", request.fleetId(), "certificate_sha256", fingerprint));
-        return new EnrollmentResponse(agentId, request.fleetId(), "ACTIVE", Map.of("protocol", "neta-agent/1", "schema_version", 1));
+        audit("AGENT_ENROLLED", agentId, Map.of(
+                "fleet_id", request.fleetId(),
+                "certificate_sha256", issued.certificateSha256(),
+                "enrollment_mode", "csr"));
+
+        return new EnrollmentResponse(
+                agentId,
+                request.fleetId(),
+                "ACTIVE",
+                issued.certificatePem(),
+                issued.certificateChainPem(),
+                issued.issuerCertificatePem(),
+                issued.fleetCaPem(),
+                issued.certificateSha256(),
+                Map.of("protocol", "neta-agent/1", "schema_version", 1));
     }
 
     private void audit(String type, String agentId, Map<String, Object> details) {
@@ -63,11 +85,15 @@ public class EnrollmentService implements ApplicationRunner {
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException("SHA-256 is unavailable", impossible); }
     }
 
-    static String normalizeFingerprint(String value) {
-        if (value == null || !value.matches("(?i)sha256:[0-9a-f]{64}")) throw ProtocolException.badRequest("certificate_sha256 must be sha256:<64 hex chars>");
-        return value.toLowerCase();
-    }
-
-    public record EnrollmentRequest(String fleetId, String token, String displayName, String certificateSha256) {}
-    public record EnrollmentResponse(String agentId, String fleetId, String status, Map<String,Object> policy) {}
+    public record EnrollmentRequest(String fleetId, String token, String displayName, String csrPem) {}
+    public record EnrollmentResponse(
+            String agentId,
+            String fleetId,
+            String status,
+            String agentCertificatePem,
+            String agentCertificateChainPem,
+            String issuerCertificatePem,
+            String fleetCaPem,
+            String certificateSha256,
+            Map<String,Object> policy) {}
 }
