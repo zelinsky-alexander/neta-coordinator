@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test;
 class EnvelopeValidatorTest {
     private static final Instant NOW = Instant.parse("2026-08-30T18:00:00Z");
     private final EnvelopeValidator validator = new EnvelopeValidator(
-            new CoordinatorProperties("fleet-test", "", Duration.ofHours(1),
+            new CoordinatorProperties("fleet-test", "", Duration.ofHours(1), null,
                     new CoordinatorProperties.Security(true, Duration.ofMinutes(2), Duration.ofMinutes(15))),
             Clock.fixed(NOW, ZoneOffset.UTC));
     private final ObjectMapper mapper = new ObjectMapper();
