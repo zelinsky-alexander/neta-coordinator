@@ -63,7 +63,7 @@ public class MessageIngestService {
             int port = target.path("port").asInt(-1);
             if (host == null || port < 1 || port > 65535) throw ProtocolException.badRequest("FindingAnnouncement.target host/port are required");
             try {
-                jdbc.update("INSERT INTO findings(finding_id,message_id,agent_id,target_host,target_port,observed_from,observed_to,changes,performance_verdict,trust_verdict,rule_set,evidence_root,payload) VALUES (?,?,?,?,?,?,?,?,?,?,CAST(? AS jsonb),?,CAST(? AS jsonb))",
+                jdbc.update("INSERT INTO findings(finding_id,message_id,agent_id,target_host,target_port,observed_from,observed_to,changes,performance_verdict,trust_verdict,rule_set,evidence_root,payload) VALUES (?,?,?,?,?,?,?,CAST(? AS jsonb),?,?,CAST(? AS jsonb),?,CAST(? AS jsonb))",
                         text(p,"finding_id"), e.messageId(), e.agentId(), host, port,
                         timestamp(p.path("observation_window").path("from")), timestamp(p.path("observation_window").path("to")),
                         json(p.path("changes")), text(p,"performance_verdict"), text(p,"trust_verdict"), json(p.path("rule_set")), text(p,"evidence_root"), json(p));
