@@ -82,6 +82,27 @@ Health:
 curl http://localhost:8080/actuator/health
 ```
 
+## Operator CLI
+
+When the coordinator is already running, use the lightweight host-side wrapper instead of starting a one-off Java container:
+
+```bash
+./neta endpoints
+./neta findings
+./neta findings 25
+```
+
+The wrapper talks to the running coordinator at `http://127.0.0.1:8080` by default, so it does not require Docker socket access, does not start another JVM, and does not wait for Compose dependency health checks. Override the address with `NETA_COORDINATOR_URL` when needed. For HTTPS/mTLS deployments, `NETA_OPERATOR_CA`, `NETA_OPERATOR_CERT`, and `NETA_OPERATOR_KEY` are supported.
+
+The backing read-only endpoints are:
+
+```text
+GET /api/v1/operator/endpoints
+GET /api/v1/operator/findings?limit=10
+```
+
+Keep the coordinator bound to loopback unless these operator endpoints are placed behind an appropriate authenticated management boundary.
+
 ## Enrollment
 
 Enrollment uses a configured one-time token and registers an already provisioned agent certificate fingerprint. Automatic certificate issuance is intentionally deferred because NAP/1 does not yet specify the CA issuance API.
