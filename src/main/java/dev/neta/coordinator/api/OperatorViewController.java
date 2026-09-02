@@ -94,6 +94,11 @@ public class OperatorViewController {
         return out.toString();
     }
 
+    @GetMapping(value = "/endpoint", produces = MediaType.TEXT_PLAIN_VALUE)
+    public String endpointQuery(@RequestParam("agent") String agent) {
+        return endpoint(agent);
+    }
+
     @GetMapping(value = "/findings", produces = MediaType.TEXT_PLAIN_VALUE)
     public String findings(@RequestParam(defaultValue = "10") int limit) {
         int boundedLimit = Math.max(1, Math.min(limit, MAX_FINDING_LIMIT));
@@ -175,6 +180,11 @@ public class OperatorViewController {
         out.append("\nRule set:\n").append(prettyJson(parseJson(row.ruleSet()))).append('\n');
         out.append("\nPayload:\n").append(prettyJson(parseJson(row.payload()))).append('\n');
         return out.toString();
+    }
+
+    @GetMapping(value = "/finding", produces = MediaType.TEXT_PLAIN_VALUE)
+    public String findingQuery(@RequestParam("id") String id) {
+        return finding(id);
     }
 
     private JsonNode parseJson(String json) {
