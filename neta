@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-base_url="${NETA_COORDINATOR_URL:-http://127.0.0.1:${NETA_HOST_PORT:-8080}}"
-curl_args=(-fsS --connect-timeout 2 --max-time 10)
+read_env_value() {
+  local key="$1" file="${2:-.env}" line
+  [[ -f "$file" ]] || return 1
+  line="$(grep -E "^[[:space:]]*${key}=" "$file" | tail -n1 || true)"
+  [[ -n "$line" ]] || return 1
+  line="${line#*=}"
+  line="${line%$'\r'}"
+  if [[ "$line" == \"*\" && "$line" == *\" ]]; then
+    line="${line:1:${#line}-2}"
+  elif [[ "$line" == \'*\' && "$line" == *\' ]]; then
+    line="${line:1:${#line}-2}"
+  fi
+  printf '%s' "$line"
+}
+
+curl_args=(-fsS --connect-timeout 1 --max-time 10)
 
 if [[ -n "${NETA_OPERATOR_CA:-}" ]]; then
   curl_args+=(--cacert "$NETA_OPERATOR_CA")
+elif [[ -f deploy/certs/fleet-ca.crt ]]; then
+  curl_args+=(--cacert deploy/certs/fleet-ca.crt)
 fi
 if [[ -n "${NETA_OPERATOR_CERT:-}" ]]; then
   curl_args+=(--cert "$NETA_OPERATOR_CERT")
@@ -14,15 +30,41 @@ if [[ -n "${NETA_OPERATOR_KEY:-}" ]]; then
   curl_args+=(--key "$NETA_OPERATOR_KEY")
 fi
 
+resolve_base_url() {
+  if [[ -n "${NETA_COORDINATOR_URL:-}" ]]; then
+    printf '%s' "${NETA_COORDINATOR_URL%/}"
+    return
+  fi
+
+  local port="${NETA_HOST_PORT:-}"
+  if [[ -z "$port" ]]; then
+    port="$(read_env_value NETA_HOST_PORT .env || true)"
+  fi
+  port="${port:-8080}"
+
+  local https="https://127.0.0.1:${port}"
+  local http="http://127.0.0.1:${port}"
+  if curl "${curl_args[@]}" -o /dev/null "$https/actuator/health" 2>/dev/null; then
+    printf '%s' "$https"
+  elif curl "${curl_args[@]}" -o /dev/null "$http/actuator/health" 2>/dev/null; then
+    printf '%s' "$http"
+  else
+    printf 'NETA coordinator is not reachable on 127.0.0.1:%s. Check: sudo docker compose ps\n' "$port" >&2
+    exit 1
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage:
   ./neta endpoints
   ./neta findings [limit]
 
-Environment:
-  NETA_COORDINATOR_URL  Coordinator base URL (default http://127.0.0.1:8080)
-  NETA_OPERATOR_CA      Optional CA certificate for HTTPS
+The wrapper automatically reads NETA_HOST_PORT from .env and detects HTTP/HTTPS.
+
+Environment overrides:
+  NETA_COORDINATOR_URL  Explicit coordinator base URL
+  NETA_OPERATOR_CA      CA certificate for HTTPS
   NETA_OPERATOR_CERT    Optional client certificate for mTLS
   NETA_OPERATOR_KEY     Optional client key for mTLS
 EOF
@@ -31,6 +73,7 @@ EOF
 command="${1:-help}"
 case "$command" in
   endpoints)
+    base_url="$(resolve_base_url)"
     exec curl "${curl_args[@]}" "$base_url/api/v1/operator/endpoints"
     ;;
   findings)
@@ -39,6 +82,7 @@ case "$command" in
       echo "finding limit must be an integer from 1 to 100" >&2
       exit 2
     fi
+    base_url="$(resolve_base_url)"
     exec curl "${curl_args[@]}" "$base_url/api/v1/operator/findings?limit=$limit"
     ;;
   help|-h|--help)
