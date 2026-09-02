@@ -3,6 +3,8 @@ package dev.neta.coordinator;
 import dev.neta.coordinator.cli.CoordinatorCliRunner;
 import dev.neta.coordinator.config.CoordinatorProperties;
 import dev.neta.coordinator.config.CoordinatorStorageProperties;
+import java.util.Map;
+import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -18,6 +20,11 @@ public class CoordinatorApplication {
         SpringApplication application = new SpringApplication(CoordinatorApplication.class);
         if (CoordinatorCliRunner.isCliInvocation(args)) {
             application.setWebApplicationType(WebApplicationType.NONE);
+            application.setBannerMode(Banner.Mode.OFF);
+            application.setDefaultProperties(Map.of(
+                    "logging.level.root", "ERROR",
+                    "spring.main.log-startup-info", "false"
+            ));
             try (ConfigurableApplicationContext ignored = application.run(args)) {
                 return;
             }
