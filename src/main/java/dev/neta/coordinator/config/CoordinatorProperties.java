@@ -15,7 +15,7 @@ public record CoordinatorProperties(
     public CoordinatorProperties {
         if (fleetId == null || fleetId.isBlank()) fleetId = "fleet-dev";
         if (bootstrapTokenTtl == null) bootstrapTokenTtl = Duration.ofHours(24);
-        if (enrollment == null) enrollment = new Enrollment(null, null, "PKCS12", "neta-agent-issuer", null, Duration.ofDays(365));
+        if (enrollment == null) enrollment = new Enrollment(null, null, "PKCS12", "neta-agent-issuer", null, Duration.ofDays(90));
         if (security == null) security = new Security(true, Duration.ofMinutes(2), Duration.ofMinutes(15));
         if (liveness == null) liveness = new Liveness(Duration.ofMinutes(7), Duration.ofMinutes(15));
     }
@@ -30,7 +30,7 @@ public record CoordinatorProperties(
         public Enrollment {
             if (issuerKeyStoreType == null || issuerKeyStoreType.isBlank()) issuerKeyStoreType = "PKCS12";
             if (issuerKeyAlias == null || issuerKeyAlias.isBlank()) issuerKeyAlias = "neta-agent-issuer";
-            if (certificateTtl == null) certificateTtl = Duration.ofDays(365);
+            if (certificateTtl == null) certificateTtl = Duration.ofDays(90);
         }
     }
 
