@@ -6,30 +6,21 @@ read_env_value() {
   [[ -f "$file" ]] || return 1
   line="$(grep -E "^[[:space:]]*${key}=" "$file" | tail -n1 || true)"
   [[ -n "$line" ]] || return 1
-  line="${line#*=}"
-  line="${line%$'\r'}"
-  if [[ "$line" == \"*\" && "$line" == *\" ]]; then
-    line="${line:1:${#line}-2}"
-  elif [[ "$line" == \'*\' && "$line" == *\' ]]; then
-    line="${line:1:${#line}-2}"
-  fi
+  line="${line#*=}"; line="${line%$'\r'}"
+  if [[ "$line" == \"*\" && "$line" == *\" ]]; then line="${line:1:${#line}-2}"
+  elif [[ "$line" == \'*\' && "$line" == *\' ]]; then line="${line:1:${#line}-2}"; fi
   printf '%s' "$line"
 }
 
 curl_args=(-fsS --connect-timeout 1 --max-time 10)
-if [[ -n "${NETA_OPERATOR_CA:-}" ]]; then
-  curl_args+=(--cacert "$NETA_OPERATOR_CA")
-elif [[ -f deploy/certs/fleet-ca.crt ]]; then
-  curl_args+=(--cacert deploy/certs/fleet-ca.crt)
-fi
+if [[ -n "${NETA_OPERATOR_CA:-}" ]]; then curl_args+=(--cacert "$NETA_OPERATOR_CA")
+elif [[ -f deploy/certs/fleet-ca.crt ]]; then curl_args+=(--cacert deploy/certs/fleet-ca.crt); fi
 [[ -n "${NETA_OPERATOR_CERT:-}" ]] && curl_args+=(--cert "$NETA_OPERATOR_CERT")
 [[ -n "${NETA_OPERATOR_KEY:-}" ]] && curl_args+=(--key "$NETA_OPERATOR_KEY")
 
 resolve_base_url() {
   if [[ -n "${NETA_COORDINATOR_URL:-}" ]]; then printf '%s' "${NETA_COORDINATOR_URL%/}"; return; fi
-  local port="${NETA_HOST_PORT:-}"
-  [[ -z "$port" ]] && port="$(read_env_value NETA_HOST_PORT .env || true)"
-  port="${port:-8080}"
+  local port="${NETA_HOST_PORT:-}"; [[ -z "$port" ]] && port="$(read_env_value NETA_HOST_PORT .env || true)"; port="${port:-8080}"
   local https="https://127.0.0.1:${port}" http="http://127.0.0.1:${port}"
   if curl "${curl_args[@]}" -o /dev/null "$https/actuator/health" 2>/dev/null; then printf '%s' "$https"
   elif curl "${curl_args[@]}" -o /dev/null "$http/actuator/health" 2>/dev/null; then printf '%s' "$http"
@@ -46,7 +37,11 @@ Usage:
   ./neta endpoints [--status online|stale|offline|revoked|never_seen]
   ./neta endpoint <agent-id-or-name>
   ./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]
-  ./neta findings [limit]
+  ./neta findings [--agent NAME] [--trust VERDICT] [--performance VERDICT]
+                  [--status STATE] [--target HOST[:PORT]] [--since 24h]
+                  [--sort last_seen|first_seen|occurrences|agent|target]
+                  [--order asc|desc] [--limit 10] [--offset 0]
+  ./neta findings-summary
   ./neta finding <finding-id>
   ./neta incidents [limit]
   ./neta incident <incident-id>
@@ -59,10 +54,7 @@ case "$command" in
     base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/status" ;;
   endpoints)
     base_url="$(resolve_base_url)"
-    if [[ "${2:-}" == "--status" ]]; then
-      require_arg "${3:-}" "usage: ./neta endpoints --status <state>"
-      exec curl "${curl_args[@]}" --get --data-urlencode "status=$3" "$base_url/api/v1/operator/endpoints-filtered"
-    fi
+    if [[ "${2:-}" == "--status" ]]; then require_arg "${3:-}" "usage: ./neta endpoints --status <state>"; exec curl "${curl_args[@]}" --get --data-urlencode "status=$3" "$base_url/api/v1/operator/endpoints-filtered"; fi
     exec curl "${curl_args[@]}" "$base_url/api/v1/operator/endpoints" ;;
   endpoint)
     agent="${2:-}"; require_arg "$agent" "usage: ./neta endpoint <agent-id-or-name>"; base_url="$(resolve_base_url)"
@@ -71,23 +63,37 @@ case "$command" in
   endpoint-history)
     agent="${2:-}"; require_arg "$agent" "usage: ./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]"
     shift 2; last="24h"; type=""; limit="100"
-    while (( $# )); do
-      case "$1" in
-        --last) require_arg "${2:-}" "--last requires a value"; last="$2"; shift 2 ;;
-        --type) require_arg "${2:-}" "--type requires a value"; type="$2"; shift 2 ;;
-        --limit) require_arg "${2:-}" "--limit requires a value"; limit="$2"; shift 2 ;;
-        *) echo "unknown endpoint-history option: $1" >&2; exit 2 ;;
-      esac
-    done
+    while (( $# )); do case "$1" in
+      --last) require_arg "${2:-}" "--last requires a value"; last="$2"; shift 2 ;;
+      --type) require_arg "${2:-}" "--type requires a value"; type="$2"; shift 2 ;;
+      --limit) require_arg "${2:-}" "--limit requires a value"; limit="$2"; shift 2 ;;
+      *) echo "unknown endpoint-history option: $1" >&2; exit 2 ;; esac; done
     [[ "$limit" =~ ^[0-9]+$ ]] && (( limit >= 1 && limit <= 500 )) || { echo "history limit must be 1..500" >&2; exit 2; }
-    base_url="$(resolve_base_url)"
-    args=("${curl_args[@]}" --get --data-urlencode "agent=$agent" --data-urlencode "last=$last" --data-urlencode "limit=$limit")
-    [[ -n "$type" ]] && args+=(--data-urlencode "type=$type")
+    base_url="$(resolve_base_url)"; args=("${curl_args[@]}" --get --data-urlencode "agent=$agent" --data-urlencode "last=$last" --data-urlencode "limit=$limit"); [[ -n "$type" ]] && args+=(--data-urlencode "type=$type")
     exec curl "${args[@]}" "$base_url/api/v1/operator/endpoint-history" ;;
   findings)
-    limit="${2:-10}"; validate_limit "$limit" "finding"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/findings?limit=$limit" ;;
+    shift; agent=""; trust=""; performance=""; status=""; target=""; since=""; sort="last_seen"; order="desc"; limit="10"; offset="0"
+    if (( $# == 1 )) && [[ "$1" =~ ^[0-9]+$ ]]; then limit="$1"; shift; fi
+    while (( $# )); do case "$1" in
+      --agent) require_arg "${2:-}" "--agent requires a value"; agent="$2"; shift 2 ;;
+      --trust) require_arg "${2:-}" "--trust requires a value"; trust="$2"; shift 2 ;;
+      --performance) require_arg "${2:-}" "--performance requires a value"; performance="$2"; shift 2 ;;
+      --status) require_arg "${2:-}" "--status requires a value"; status="$2"; shift 2 ;;
+      --target) require_arg "${2:-}" "--target requires a value"; target="$2"; shift 2 ;;
+      --since) require_arg "${2:-}" "--since requires a value"; since="$2"; shift 2 ;;
+      --sort) require_arg "${2:-}" "--sort requires a value"; sort="$2"; shift 2 ;;
+      --order) require_arg "${2:-}" "--order requires a value"; order="$2"; shift 2 ;;
+      --limit) require_arg "${2:-}" "--limit requires a value"; limit="$2"; shift 2 ;;
+      --offset) require_arg "${2:-}" "--offset requires a value"; offset="$2"; shift 2 ;;
+      *) echo "unknown findings option: $1" >&2; exit 2 ;; esac; done
+    validate_limit "$limit" "finding"; [[ "$offset" =~ ^[0-9]+$ ]] || { echo "finding offset must be a non-negative integer" >&2; exit 2; }
+    base_url="$(resolve_base_url)"; args=("${curl_args[@]}" --get --data-urlencode "limit=$limit" --data-urlencode "offset=$offset" --data-urlencode "sort=$sort" --data-urlencode "order=$order")
+    [[ -n "$agent" ]] && args+=(--data-urlencode "agent=$agent"); [[ -n "$trust" ]] && args+=(--data-urlencode "trust=$trust"); [[ -n "$performance" ]] && args+=(--data-urlencode "performance=$performance"); [[ -n "$status" ]] && args+=(--data-urlencode "status=$status"); [[ -n "$target" ]] && args+=(--data-urlencode "target=$target"); [[ -n "$since" ]] && args+=(--data-urlencode "since=$since")
+    exec curl "${args[@]}" "$base_url/api/v1/operator/finding-search" ;;
+  findings-summary)
+    base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/finding-summary" ;;
   finding)
-    finding_id="${2:-}"; require_arg "$finding_id" "usage: ./neta finding <finding-id>"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "id=$finding_id" "$base_url/api/v1/operator/finding" ;;
+    finding_id="${2:-}"; require_arg "$finding_id" "usage: ./neta finding <finding-id>"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "id=$finding_id" "$base_url/api/v1/operator/finding-detail" ;;
   incidents)
     limit="${2:-20}"; validate_limit "$limit" "incident"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/incidents?limit=$limit" ;;
   incident)
