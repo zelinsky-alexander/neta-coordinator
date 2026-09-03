@@ -33,6 +33,9 @@ neta:
     require-client-certificate: ${NETA_REQUIRE_CLIENT_CERTIFICATE:true}
     max-clock-skew: ${NETA_MAX_CLOCK_SKEW:PT2M}
     max-message-lifetime: ${NETA_MAX_MESSAGE_LIFETIME:PT15M}
+  liveness:
+    online-threshold: ${NETA_AGENT_ONLINE_THRESHOLD:PT7M}
+    offline-threshold: ${NETA_AGENT_OFFLINE_THRESHOLD:PT15M}
   storage:
     retain-heartbeats: ${NETA_RETAIN_HEARTBEATS:false}
     audit-heartbeats: ${NETA_AUDIT_HEARTBEATS:false}
