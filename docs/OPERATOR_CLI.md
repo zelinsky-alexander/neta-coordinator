@@ -5,7 +5,11 @@ The coordinator exposes small read-only operator commands so routine fleet inspe
 ```bash
 ./neta status
 ./neta endpoints
+./neta endpoints --status online
+./neta endpoints --status stale
+./neta endpoints --status offline
 ./neta endpoint <agent-id-or-name>
+./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]
 ./neta findings [limit]
 ./neta finding <finding-id>
 ./neta incidents [limit]
@@ -26,9 +30,34 @@ Endpoint liveness defaults are:
 
 The thresholds can be overridden with `NETA_AGENT_ONLINE_THRESHOLD` and `NETA_AGENT_OFFLINE_THRESHOLD`.
 
-## `endpoints` and `endpoint`
+## Endpoint filtering
 
-`endpoints` prints enrolled agents using coordinator identity and liveness state. `endpoint <id-or-name>` adds enrollment details, last sequence, certificate fingerprint, liveness thresholds, and the retained latest heartbeat payload.
+`endpoints` prints enrolled agents using coordinator identity and liveness state. Filter by computed liveness without querying PostgreSQL directly:
+
+```bash
+./neta endpoints --status online
+./neta endpoints --status stale
+./neta endpoints --status offline
+./neta endpoints --status revoked
+./neta endpoints --status never_seen
+```
+
+## Endpoint detail and history
+
+`endpoint <id-or-name>` prints enrollment details, last sequence, certificate fingerprint, liveness thresholds, and the retained latest heartbeat payload. C4.2 also appends up to five recent findings and five recent incidents for that endpoint.
+
+`endpoint-history` uses a compact bounded contact-history table. Every accepted agent message contributes only: agent ID, message type, sequence, message ID, and coordinator receipt time. Full heartbeat payloads are not duplicated.
+
+Examples:
+
+```bash
+./neta endpoint-history wsl-agent-1
+./neta endpoint-history wsl-agent-1 --last 24h
+./neta endpoint-history wsl-agent-1 --last 7d --limit 200
+./neta endpoint-history wsl-agent-1 --type heartbeat
+```
+
+Supported `--last` values include `30m`, `24h`, `7d`, and ISO-8601 durations such as `PT12H`. Contact history is retained according to `NETA_ACCEPTED_AUDIT_RETENTION` (default `P30D`) and is cleaned by the existing periodic retention job.
 
 NAP/1 does not yet standardize platform/site heartbeat fields. The views therefore read optional metadata from the heartbeat payload and print `-` when it is unavailable.
 
