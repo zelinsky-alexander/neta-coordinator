@@ -32,7 +32,7 @@ public class StorageOperatorController {
                 table("findings", "last_seen"),
                 table("incidents", "last_seen"),
                 table("incident_findings", null),
-                table("endpoint_contact_history", "received_at"),
+                table("endpoint_contact_history", "contact_at"),
                 table("protocol_messages", "received_at"),
                 table("audit_events", "created_at"),
                 table("evidence_summaries", "received_at"),
@@ -68,7 +68,7 @@ public class StorageOperatorController {
         retentionLine(out, "protocol_messages", storage.protocolRetention(), oldestIfPresent("protocol_messages", "received_at"), now);
         retentionLine(out, "audit_events MESSAGE_ACCEPTED", storage.acceptedAuditRetention(),
                 oldestWhereIfPresent("audit_events", "created_at", "event_type='MESSAGE_ACCEPTED'"), now);
-        retentionLine(out, "endpoint_contact_history", storage.acceptedAuditRetention(), oldestIfPresent("endpoint_contact_history", "received_at"), now);
+        retentionLine(out, "endpoint_contact_history", storage.acceptedAuditRetention(), oldestIfPresent("endpoint_contact_history", "contact_at"), now);
         retentionLine(out, "consumed enrollment tokens", storage.acceptedAuditRetention(),
                 oldestWhereIfPresent("enrollment_tokens", "consumed_at", "consumed_at IS NOT NULL"), now);
 
