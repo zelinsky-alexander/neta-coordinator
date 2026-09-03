@@ -53,12 +53,22 @@ public class EnrollmentService implements ApplicationRunner {
         var issued = certificateIssuer.issue(agentId, request.csrPem());
         String displayName = request.displayName() == null || request.displayName().isBlank() ? agentId : request.displayName().trim();
 
-        jdbc.update("INSERT INTO agents(agent_id,fleet_id,display_name,certificate_sha256,status) VALUES (?,?,?,?, 'ACTIVE')",
-                agentId, request.fleetId(), displayName, issued.certificateSha256());
+        jdbc.update("""
+                INSERT INTO agents(agent_id,fleet_id,display_name,certificate_sha256,status,
+                                   certificate_not_before,certificate_not_after,certificate_registered_at)
+                VALUES (?,?,?,?, 'ACTIVE',?,?,now())
+                """, agentId, request.fleetId(), displayName, issued.certificateSha256(),
+                Timestamp.from(issued.notBefore()), Timestamp.from(issued.notAfter()));
+        jdbc.update("""
+                INSERT INTO agent_certificate_history(agent_id,certificate_sha256,not_before,not_after,status,reason)
+                VALUES (?,?,?,?, 'ACTIVE','initial enrollment')
+                """, agentId, issued.certificateSha256(), Timestamp.from(issued.notBefore()), Timestamp.from(issued.notAfter()));
         jdbc.update("UPDATE enrollment_tokens SET consumed_at=now(), consumed_by_agent_id=? WHERE token_id=?", agentId, rows.getFirst());
         audit("AGENT_ENROLLED", agentId, Map.of(
                 "fleet_id", request.fleetId(),
                 "certificate_sha256", issued.certificateSha256(),
+                "certificate_not_before", issued.notBefore().toString(),
+                "certificate_not_after", issued.notAfter().toString(),
                 "enrollment_mode", "csr"));
 
         return new EnrollmentResponse(
@@ -70,6 +80,8 @@ public class EnrollmentService implements ApplicationRunner {
                 issued.issuerCertificatePem(),
                 issued.fleetCaPem(),
                 issued.certificateSha256(),
+                issued.notBefore(),
+                issued.notAfter(),
                 Map.of("protocol", "neta-agent/1", "schema_version", 1));
     }
 
@@ -95,5 +107,7 @@ public class EnrollmentService implements ApplicationRunner {
             String issuerCertificatePem,
             String fleetCaPem,
             String certificateSha256,
+            Instant certificateNotBefore,
+            Instant certificateNotAfter,
             Map<String,Object> policy) {}
 }
