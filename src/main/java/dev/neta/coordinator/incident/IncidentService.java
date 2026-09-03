@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,6 +21,7 @@ public class IncidentService {
         this.jdbc = jdbc;
     }
 
+    @Scheduled(fixedDelayString = "${NETA_INCIDENT_SYNC_INTERVAL:PT1M}")
     @Transactional
     public void syncAll() {
         List<String> ungrouped = jdbc.query("""
@@ -31,11 +33,10 @@ public class IncidentService {
                 """, (rs, n) -> rs.getString(1));
         for (String findingId : ungrouped) assignFinding(findingId);
 
-        List<String> incidents = jdbc.query("SELECT incident_id FROM incidents", (rs, n) -> rs.getString(1));
-        for (String incidentId : incidents) recompute(incidentId);
+        List<String> incidentIds = jdbc.query("SELECT incident_id FROM incidents", (rs, n) -> rs.getString(1));
+        for (String incidentId : incidentIds) recompute(incidentId);
     }
 
-    @Transactional
     public void assignFinding(String findingId) {
         List<FindingRef> rows = jdbc.query("""
                 SELECT finding_id, agent_id, target_host, target_port, first_seen, last_seen
