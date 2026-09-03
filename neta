@@ -62,13 +62,24 @@ require_arg() {
   fi
 }
 
+validate_limit() {
+  local limit="$1" label="$2"
+  if ! [[ "$limit" =~ ^[0-9]+$ ]] || (( limit < 1 || limit > 100 )); then
+    echo "$label limit must be an integer from 1 to 100" >&2
+    exit 2
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage:
+  ./neta status
   ./neta endpoints
   ./neta endpoint <agent-id-or-name>
   ./neta findings [limit]
   ./neta finding <finding-id>
+  ./neta incidents [limit]
+  ./neta incident <incident-id>
 
 The wrapper automatically reads NETA_HOST_PORT from .env and detects HTTP/HTTPS.
 
@@ -82,6 +93,10 @@ EOF
 
 command="${1:-help}"
 case "$command" in
+  status)
+    base_url="$(resolve_base_url)"
+    exec curl "${curl_args[@]}" "$base_url/api/v1/operator/status"
+    ;;
   endpoints)
     base_url="$(resolve_base_url)"
     exec curl "${curl_args[@]}" "$base_url/api/v1/operator/endpoints"
@@ -94,10 +109,7 @@ case "$command" in
     ;;
   findings)
     limit="${2:-10}"
-    if ! [[ "$limit" =~ ^[0-9]+$ ]] || (( limit < 1 || limit > 100 )); then
-      echo "finding limit must be an integer from 1 to 100" >&2
-      exit 2
-    fi
+    validate_limit "$limit" "finding"
     base_url="$(resolve_base_url)"
     exec curl "${curl_args[@]}" "$base_url/api/v1/operator/findings?limit=$limit"
     ;;
@@ -106,6 +118,18 @@ case "$command" in
     require_arg "$finding_id" "usage: ./neta finding <finding-id>"
     base_url="$(resolve_base_url)"
     exec curl "${curl_args[@]}" --get --data-urlencode "id=$finding_id" "$base_url/api/v1/operator/finding"
+    ;;
+  incidents)
+    limit="${2:-20}"
+    validate_limit "$limit" "incident"
+    base_url="$(resolve_base_url)"
+    exec curl "${curl_args[@]}" "$base_url/api/v1/operator/incidents?limit=$limit"
+    ;;
+  incident)
+    incident_id="${2:-}"
+    require_arg "$incident_id" "usage: ./neta incident <incident-id>"
+    base_url="$(resolve_base_url)"
+    exec curl "${curl_args[@]}" --get --data-urlencode "id=$incident_id" "$base_url/api/v1/operator/incident"
     ;;
   help|-h|--help)
     usage
