@@ -24,6 +24,8 @@ public class RetentionService {
         Instant now = Instant.now();
         jdbc.update("DELETE FROM protocol_messages WHERE received_at < ?",
                 Timestamp.from(now.minus(properties.protocolRetention())));
+        jdbc.update("DELETE FROM endpoint_contact_history WHERE contact_at < ?",
+                Timestamp.from(now.minus(properties.acceptedAuditRetention())));
         jdbc.update("DELETE FROM audit_events WHERE event_type='MESSAGE_ACCEPTED' AND created_at < ?",
                 Timestamp.from(now.minus(properties.acceptedAuditRetention())));
         jdbc.update("DELETE FROM enrollment_tokens WHERE consumed_at IS NOT NULL AND consumed_at < ?",
