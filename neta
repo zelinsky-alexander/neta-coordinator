@@ -34,6 +34,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ./neta status
+  ./neta storage
   ./neta endpoints [--status online|stale|offline|revoked|never_seen]
   ./neta endpoint <agent-id-or-name>
   ./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]
@@ -52,6 +53,8 @@ command="${1:-help}"
 case "$command" in
   status)
     base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/status" ;;
+  storage)
+    base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/storage" ;;
   endpoints)
     base_url="$(resolve_base_url)"
     if [[ "${2:-}" == "--status" ]]; then require_arg "${3:-}" "usage: ./neta endpoints --status <state>"; exec curl "${curl_args[@]}" --get --data-urlencode "status=$3" "$base_url/api/v1/operator/endpoints-filtered"; fi
