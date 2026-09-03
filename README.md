@@ -25,13 +25,13 @@ Implemented now:
 
 Deliberately **not** claimed as complete yet:
 
-- coordinator CA/certificate issuance and revocation lifecycle;
+- C4.7 certificate lifecycle/expiry tracking and secure rotation (planned in `docs/COORDINATOR_C4_ROADMAP.md`);
+- coordinator CA/certificate issuance lifecycle beyond current enrolled-fingerprint trust and C4.6 revocation;
 - canonical NAP/1 object serialization;
 - cryptographic verification of retained object signatures or `payload_hash` values;
 - coordinator-side corroboration selection/fan-out scheduler;
 - evidence-bundle request/transfer;
 - fleet verdict/correlation rules;
-- retention cleanup jobs;
 - redundant coordinator operation.
 
 NAP/1 requires an unambiguous canonical representation before signed objects can be verified. Until that protocol detail is fixed, this service requires signature metadata but does not falsely treat it as cryptographically verified. This first version is therefore a development foundation, not a production-ready trust authority.
@@ -105,7 +105,7 @@ Keep the coordinator bound to loopback unless these operator endpoints are place
 
 ## Enrollment
 
-Enrollment uses a configured one-time token and registers an already provisioned agent certificate fingerprint. Automatic certificate issuance is intentionally deferred because NAP/1 does not yet specify the CA issuance API.
+Enrollment uses a configured one-time token and registers an already provisioned agent certificate fingerprint. Automatic certificate issuance is intentionally deferred because NAP/1 does not yet specify the CA issuance API. Certificate expiration tracking and secure rotation are explicitly planned as C4.7; see `docs/COORDINATOR_C4_ROADMAP.md`.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/enrollment \
