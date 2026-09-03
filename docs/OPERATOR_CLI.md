@@ -4,6 +4,7 @@ The coordinator exposes small read-only operator commands so routine fleet inspe
 
 ```bash
 ./neta status
+./neta storage
 ./neta endpoints
 ./neta endpoints --status online
 ./neta endpoint <agent-id-or-name>
@@ -28,6 +29,24 @@ Endpoint liveness defaults are:
 - `REVOKED`: enrollment is revoked.
 
 The thresholds can be overridden with `NETA_AGENT_ONLINE_THRESHOLD` and `NETA_AGENT_OFFLINE_THRESHOLD`.
+
+## Storage and retention status (C4.5)
+
+`storage` prints PostgreSQL database size, row counts and PostgreSQL relation sizes for the coordinator's major tables, oldest/newest retained timestamps where meaningful, and the active bounded-storage configuration.
+
+```bash
+./neta storage
+```
+
+It reports the current heartbeat retention mode, heartbeat audit mode, protocol retention, audit/contact-history retention, and cleanup interval. The retention-window section compares the configured windows with the observed oldest rows for `protocol_messages`, accepted-message audit rows, compact endpoint contact history, and consumed enrollment tokens.
+
+The command is read-only. It does not run cleanup or VACUUM and does not impose a new database-size cap. PostgreSQL `pg_database_size` and `pg_total_relation_size` are used for storage accounting.
+
+The coordinator health check also verifies that the storage/retention operator view is reachable and exposes its retention configuration:
+
+```bash
+sudo ./deploy/health-check.sh
+```
 
 ## Endpoint filtering
 
