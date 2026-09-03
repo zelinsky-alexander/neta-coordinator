@@ -6,11 +6,10 @@ The coordinator exposes small read-only operator commands so routine fleet inspe
 ./neta status
 ./neta endpoints
 ./neta endpoints --status online
-./neta endpoints --status stale
-./neta endpoints --status offline
 ./neta endpoint <agent-id-or-name>
 ./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]
-./neta findings [limit]
+./neta findings [filters]
+./neta findings-summary
 ./neta finding <finding-id>
 ./neta incidents [limit]
 ./neta incident <incident-id>
@@ -32,7 +31,7 @@ The thresholds can be overridden with `NETA_AGENT_ONLINE_THRESHOLD` and `NETA_AG
 
 ## Endpoint filtering
 
-`endpoints` prints enrolled agents using coordinator identity and liveness state. Filter by computed liveness without querying PostgreSQL directly:
+Filter by computed liveness:
 
 ```bash
 ./neta endpoints --status online
@@ -44,11 +43,9 @@ The thresholds can be overridden with `NETA_AGENT_ONLINE_THRESHOLD` and `NETA_AG
 
 ## Endpoint detail and history
 
-`endpoint <id-or-name>` prints enrollment details, last sequence, certificate fingerprint, liveness thresholds, and the retained latest heartbeat payload. C4.2 also appends up to five recent findings and five recent incidents for that endpoint.
+`endpoint <id-or-name>` prints enrollment details, last sequence, certificate fingerprint, liveness thresholds, the retained latest heartbeat payload, and recent findings/incidents.
 
-`endpoint-history` uses a compact bounded contact-history table. Every accepted agent message contributes only: agent ID, message type, sequence, message ID, and coordinator receipt time. Full heartbeat payloads are not duplicated.
-
-Examples:
+`endpoint-history` uses a compact bounded contact-history table. Every accepted agent message contributes only agent ID, message type, sequence, message ID, and coordinator receipt time. Full heartbeat payloads are not duplicated.
 
 ```bash
 ./neta endpoint-history wsl-agent-1
@@ -57,13 +54,46 @@ Examples:
 ./neta endpoint-history wsl-agent-1 --type heartbeat
 ```
 
-Supported `--last` values include `30m`, `24h`, `7d`, and ISO-8601 durations such as `PT12H`. Contact history is retained according to `NETA_ACCEPTED_AUDIT_RETENTION` (default `P30D`) and is cleaned by the existing periodic retention job.
+Supported `--last` values include `30m`, `24h`, `7d`, and ISO-8601 durations such as `PT12H`. Contact history is retained according to `NETA_ACCEPTED_AUDIT_RETENTION` (default `P30D`).
 
-NAP/1 does not yet standardize platform/site heartbeat fields. The views therefore read optional metadata from the heartbeat payload and print `-` when it is unavailable.
+## Finding investigation and search (C4.3)
 
-## `findings` and `finding`
+`findings` is a combinable read-only search command. Supported filters include agent, Trust verdict, Performance verdict, finding status, target, recency, sorting, offset, and limit.
 
-`findings [N]` prints aggregate finding counts followed by the latest findings, newest first. The default limit is 10 and the maximum is 100. `finding <id>` prints the retained details and payload for one finding.
+```bash
+./neta findings --agent wsl-agent-1
+./neta findings --trust changed
+./neta findings --trust suspicious --since 24h
+./neta findings --performance insufficient_evidence
+./neta findings --status active
+./neta findings --target 127.0.0.1:9443
+./neta findings --agent wsl-agent-1 --trust changed --since 7d
+./neta findings --sort occurrences --order desc --limit 25
+./neta findings --limit 25 --offset 25
+```
+
+For compatibility, `./neta findings 25` is still accepted as a shorthand for `--limit 25`.
+
+`--since` accepts compact values such as `30m`, `24h`, `7d`, or ISO-8601 durations such as `PT12H`. Supported sort values are `last_seen`, `first_seen`, `occurrences`, `agent`, and `target`. The default is newest last-seen first.
+
+Search output includes the incident ID when the finding is currently grouped, providing direct navigation from finding search into Incident v0.
+
+`finding <id>` now leads with a compact analyst view before raw retained material: agent and incident linkage, target, state, occurrence count, first/last seen, Trust and Performance assessment, observed changes, evidence root, rule set, and then the raw payload.
+
+```bash
+./neta finding FINDING-CONN-167-22c85e3784dc
+./neta incident INCIDENT-...
+```
+
+`findings-summary` provides a quick aggregate investigation view:
+
+```bash
+./neta findings-summary
+```
+
+It reports total/active findings, Trust distribution, Performance distribution, top targets, and the endpoints with the most retained findings.
+
+C4.3 remains read-only. Acknowledge/close/assign/comment workflow state is intentionally deferred until analyst authorization and incident lifecycle semantics are defined.
 
 ## Incident grouping v0
 
@@ -76,6 +106,8 @@ Incident v0 is deterministic coordinator-side grouping and requires no new agent
 
 The one-hour gap is intentionally conservative. Incident v0 does not merge observations across endpoints or across targets. A background coordinator task synchronizes ungrouped findings once per minute by default (`NETA_INCIDENT_SYNC_INTERVAL=PT1M`), and the status/incident operator views also synchronize before rendering.
 
-`incidents [N]` prints recent incidents with agent, target, member finding count, suspicious count and changed count. `incident <id>` prints the incident metadata followed by all member findings.
+`incidents [N]` prints recent incidents with agent, target, member finding count, suspicious count and changed count. `incident <id>` prints incident metadata followed by all member findings.
 
 Incidents are persisted in `incidents` and `incident_findings`; finding rows remain authoritative evidence and membership is traceable.
+
+NAP/1 does not yet standardize platform/site heartbeat fields. Endpoint views therefore read optional metadata from the heartbeat payload and print `-` when unavailable.
