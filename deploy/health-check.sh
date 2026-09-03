@@ -92,6 +92,18 @@ else
   failed "operator API: findings query failed"
 fi
 
+if ./neta storage >/tmp/neta-coordinator-storage.$$ 2>/tmp/neta-coordinator-storage-err.$$; then
+  pass "operator API: storage/retention query succeeded"
+  if grep -q '^Protocol retention:' /tmp/neta-coordinator-storage.$$ && grep -q '^Audit/contact retention:' /tmp/neta-coordinator-storage.$$; then
+    pass "storage retention configuration is visible"
+  else
+    warning "storage query succeeded but retention fields were not found"
+  fi
+else
+  failed "operator API: storage query failed: $(cat /tmp/neta-coordinator-storage-err.$$ 2>/dev/null || true)"
+fi
+rm -f /tmp/neta-coordinator-storage.$$ /tmp/neta-coordinator-storage-err.$$
+
 if "${compose[@]}" logs --since=30m coordinator 2>/dev/null | grep -q 'Invalid character found in method name'; then
   warning "recent logs contain TLS-to-HTTP parsing errors; verify no plain-HTTP deployment was active"
 fi
