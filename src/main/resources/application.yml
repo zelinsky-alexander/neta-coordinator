@@ -28,7 +28,7 @@ neta:
     issuer-key-store-type: ${NETA_ENROLLMENT_ISSUER_KEY_STORE_TYPE:PKCS12}
     issuer-key-alias: ${NETA_ENROLLMENT_ISSUER_KEY_ALIAS:neta-agent-issuer}
     fleet-ca-file: ${NETA_FLEET_CA_FILE:}
-    certificate-ttl: ${NETA_ENROLLMENT_CERTIFICATE_TTL:P365D}
+    certificate-ttl: ${NETA_ENROLLMENT_CERTIFICATE_TTL:P90D}
   security:
     require-client-certificate: ${NETA_REQUIRE_CLIENT_CERTIFICATE:true}
     max-clock-skew: ${NETA_MAX_CLOCK_SKEW:PT2M}
