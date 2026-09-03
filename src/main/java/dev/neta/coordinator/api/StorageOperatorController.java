@@ -54,6 +54,10 @@ public class StorageOperatorController {
         out.append("---------------------------------\n");
         out.append(String.format("%-28s %10s %12s %12s %12s%n", "TABLE", "ROWS", "SIZE", "OLDEST", "NEWEST"));
         for (TableStat stat : tables) {
+            if (!stat.available()) {
+                out.append(String.format("%-28s %10s %12s %12s %12s%n", stat.name(), "-", "MISSING", "-", "-"));
+                continue;
+            }
             out.append(String.format("%-28s %10d %12s %12s %12s%n",
                     stat.name(), stat.rows(), humanBytes(stat.bytes()),
                     relativeAge(stat.oldest(), now), relativeAge(stat.newest(), now)));
@@ -61,22 +65,28 @@ public class StorageOperatorController {
 
         out.append("\nRetention windows\n");
         out.append("---------------------------------\n");
-        retentionLine(out, "protocol_messages", storage.protocolRetention(), oldest("protocol_messages", "received_at"), now);
+        retentionLine(out, "protocol_messages", storage.protocolRetention(), oldestIfPresent("protocol_messages", "received_at"), now);
         retentionLine(out, "audit_events MESSAGE_ACCEPTED", storage.acceptedAuditRetention(),
-                oldestWhere("audit_events", "created_at", "event_type='MESSAGE_ACCEPTED'"), now);
-        retentionLine(out, "endpoint_contact_history", storage.acceptedAuditRetention(), oldest("endpoint_contact_history", "received_at"), now);
+                oldestWhereIfPresent("audit_events", "created_at", "event_type='MESSAGE_ACCEPTED'"), now);
+        retentionLine(out, "endpoint_contact_history", storage.acceptedAuditRetention(), oldestIfPresent("endpoint_contact_history", "received_at"), now);
         retentionLine(out, "consumed enrollment tokens", storage.acceptedAuditRetention(),
-                oldestWhere("enrollment_tokens", "consumed_at", "consumed_at IS NOT NULL"), now);
+                oldestWhereIfPresent("enrollment_tokens", "consumed_at", "consumed_at IS NOT NULL"), now);
 
         return out.toString();
     }
 
     private TableStat table(String table, String timeColumn) {
+        if (!relationExists(table)) return new TableStat(table, false, 0L, 0L, null, null);
         long rows = count(table);
         long bytes = relationBytes(table);
         Instant oldest = timeColumn == null ? null : oldest(table, timeColumn);
         Instant newest = timeColumn == null ? null : newest(table, timeColumn);
-        return new TableStat(table, rows, bytes, oldest, newest);
+        return new TableStat(table, true, rows, bytes, oldest, newest);
+    }
+
+    private boolean relationExists(String table) {
+        String relation = jdbc.queryForObject("SELECT to_regclass(?)::text", String.class, table);
+        return relation != null && !relation.isBlank();
     }
 
     private long count(String table) {
@@ -85,8 +95,16 @@ public class StorageOperatorController {
     }
 
     private long relationBytes(String table) {
-        Long value = jdbc.queryForObject("SELECT pg_total_relation_size('" + table + "'::regclass)", Long.class);
+        Long value = jdbc.queryForObject("SELECT pg_total_relation_size(to_regclass(?))", Long.class, table);
         return value == null ? 0L : value;
+    }
+
+    private Instant oldestIfPresent(String table, String column) {
+        return relationExists(table) ? oldest(table, column) : null;
+    }
+
+    private Instant oldestWhereIfPresent(String table, String column, String predicate) {
+        return relationExists(table) ? oldestWhere(table, column, predicate) : null;
     }
 
     private Instant oldest(String table, String column) {
@@ -107,7 +125,7 @@ public class StorageOperatorController {
     }
 
     private static void retentionLine(StringBuilder out, String name, Duration configured, Instant oldest, Instant now) {
-        String observed = oldest == null ? "empty" : relativeAge(oldest, now) + " old";
+        String observed = oldest == null ? "empty/unavailable" : relativeAge(oldest, now) + " old";
         out.append(String.format("%-30s configured=%-8s oldest=%s%n", name, configured, observed));
     }
 
@@ -138,5 +156,5 @@ public class StorageOperatorController {
         return String.format("%.2f %s", value, units[unit]);
     }
 
-    private record TableStat(String name, long rows, long bytes, Instant oldest, Instant newest) {}
+    private record TableStat(String name, boolean available, long rows, long bytes, Instant oldest, Instant newest) {}
 }
