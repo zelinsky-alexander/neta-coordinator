@@ -85,7 +85,7 @@ public class StorageOperatorController {
     }
 
     private long relationBytes(String table) {
-        Long value = jdbc.queryForObject("SELECT pg_total_relation_size(?)", Long.class, table);
+        Long value = jdbc.queryForObject("SELECT pg_total_relation_size('" + table + "'::regclass)", Long.class);
         return value == null ? 0L : value;
     }
 
