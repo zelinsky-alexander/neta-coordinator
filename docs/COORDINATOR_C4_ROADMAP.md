@@ -14,130 +14,85 @@ C4 turns the coordinator from a basic ingestion service into an operator-usable 
 | C4.4 | Incident grouping v0 | DONE |
 | C4.5 | Storage/retention status | DONE |
 | C4.6 | Agent administration/revocation | DONE |
-| C4.7 | Certificate lifecycle and rotation | PLANNED |
+| C4.7 | Certificate lifecycle and rotation | DONE |
 
 ## C4.7 — Certificate lifecycle and rotation
 
-### Goal
+### Implemented policy
 
-Bound the lifetime of agent credentials, make upcoming certificate expiry visible to operators, and support safe certificate replacement without changing the stable NETA `AgentId`.
+- New NETA-issued agent certificates default to **90 days** (`NETA_ENROLLMENT_CERTIFICATE_TTL=P90D`).
+- Warning threshold defaults to **30 days** (`NETA_CERTIFICATE_WARNING_WINDOW=P30D`).
+- Critical threshold defaults to **7 days** (`NETA_CERTIFICATE_CRITICAL_WINDOW=P7D`).
+- Expired certificates are rejected by explicit coordinator ingestion policy in addition to normal TLS/X.509 validation.
+- Revocation remains independent and immediately disables an enrolled agent.
 
-Expiration and revocation solve different problems and both are required:
+### Lifecycle persistence
 
-- **expiration** limits how long a credential remains usable by default;
-- **revocation** immediately removes trust when an identity or private key is suspected to be compromised.
+Flyway V5 adds active certificate validity metadata to `agents` and an `agent_certificate_history` table. Newly enrolled certificates persist their actual X.509 `notBefore` and `notAfter` values. Existing pre-C4.7 agents are automatically backfilled from the authenticated peer X.509 certificate on their next accepted mTLS message.
 
-### Initial policy
+The coordinator records:
 
-- Default agent-certificate lifetime target: **90 days**.
-- Coordinator warning threshold: **30 days before expiry**.
-- Strong/critical warning threshold: **7 days before expiry**.
-- An expired certificate must not be accepted for normal agent ingestion.
-- Successful rotation should retire the previous certificate identity rather than leaving both trusted indefinitely.
-- Initial rotation may be explicit/operator-assisted; automatic renewal should only be enabled after the rotation flow is proven reliable.
+- active SHA-256 fingerprint,
+- `notBefore`,
+- `notAfter`,
+- registration time,
+- last rotation time,
+- active/retired certificate history,
+- rotation reason.
 
-The lifetime and warning thresholds should be configurable rather than permanently hard-coded.
-
-### Coordinator data model
-
-Track certificate lifecycle metadata for each enrolled agent, at minimum:
-
-- certificate SHA-256 fingerprint,
-- certificate `notBefore`,
-- certificate `notAfter`,
-- issuance/registration time,
-- most recent rotation time,
-- lifecycle status.
-
-A later implementation may normalize certificates into a separate certificate-history table so prior fingerprints and rotation events remain auditable while the active certificate remains unambiguous.
+Private keys are never stored by the coordinator.
 
 ### Operator visibility
-
-Planned operator views:
 
 ```text
 ./neta certificates
 ./neta certificates --expiring 30d
+./neta certificate <agent-id-or-name>
 ./neta agent <agent-id-or-name>
 ./neta status
 ```
 
-Expected fleet summary shape:
+Lifecycle states are `VALID`, `EXPIRING`, `CRITICAL`, `EXPIRED`, and temporarily `UNKNOWN` until a pre-C4.7 enrollment sends an authenticated message and its validity dates are backfilled.
+
+`./neta status` includes fleet certificate counts. Agent administration detail appends certificate lifecycle and certificate-history information.
+
+### Health checks
+
+`deploy/health-check.sh` is read-only and now:
+
+- verifies certificate lifecycle operator access,
+- warns for `EXPIRING`, `CRITICAL`, or temporarily `UNKNOWN` lifecycle state,
+- fails if an enrolled active certificate is `EXPIRED`,
+- never rotates or revokes automatically.
+
+### Rotation flow
+
+C4.7 uses the already configured NETA fleet enrollment issuer rather than inventing a second CA path. Rotation is operator-authorized with `NETA_OPERATOR_ADMIN_TOKEN`, requires a new PKCS#10 CSR and explicit `--yes`, and preserves the same `AgentId`.
 
 ```text
-Certificates
-  Valid          N
-  Expiring       N
-  Critical       N
-  Expired        N
+agent creates new private key + CSR
+        |
+        v
+./neta certificate rotate <agent> --csr new.csr --out new-chain.pem --reason ... --yes
+        |
+        v
+coordinator validates CSR and issues new client certificate
+        |
+        +-- retires old fingerprint in certificate history
+        +-- atomically activates new fingerprint/validity
+        +-- writes AGENT_CERTIFICATE_ROTATED audit event
+        v
+operator installs new certificate chain with the new endpoint-local private key
 ```
 
-Agent detail should show the active fingerprint, validity interval, remaining lifetime, and most recent rotation event.
+After coordinator activation, the old certificate fingerprint is rejected by normal ingestion fingerprint matching. The returned file contains the replacement certificate chain only; the private key remains on the endpoint that generated the CSR.
 
-### Health and operational checks
+The operator-assisted authorization is intentionally conservative for this milestone. A later unattended renewal flow can require proof of possession of the currently active agent identity before automatic issuance.
 
-`deploy/health-check.sh` should warn when an active agent certificate is within the configured warning window and fail or prominently report any active enrollment whose certificate is already expired.
+### Recovery boundary
 
-The health check must remain read-only and must never rotate or revoke a certificate automatically.
-
-### Secure rotation flow
-
-The rotation design must preserve the stable NETA `AgentId` while proving possession of an already trusted identity.
-
-Conceptual flow:
-
-```text
-currently trusted agent certificate
-            |
-            | authenticated rotation request / authorization
-            v
-Coordinator or fleet CA validates current identity
-            |
-            | issues or authorizes replacement certificate
-            v
-agent installs replacement certificate + private key
-            |
-            | reconnects and proves possession
-            v
-Coordinator atomically activates new fingerprint
-            |
-            v
-previous certificate is retired/rejected
-```
-
-Requirements:
-
-1. Rotation must not be authorized solely by knowledge of an `AgentId`.
-2. The existing trusted identity, an explicit operator authorization, or another strong fleet-management credential must authorize the transition.
-3. The new certificate must be validated before the old certificate is retired.
-4. Rotation events must be written to `audit_events` with old/new fingerprints and reason/source metadata, without storing private keys.
-5. Failure during rotation must not leave the endpoint permanently unable to recover; an explicit bounded recovery path must exist.
-6. Private keys remain endpoint-local or CA-managed and are never stored in coordinator application logs or normal database rows.
-
-### Certificate authority boundary
-
-C4.7 does not require the coordinator itself to become a general-purpose CA. The implementation should keep issuance and lifecycle-policy responsibilities separable so NETA can later use:
-
-- the existing fleet CA tooling,
-- an external/private PKI,
-- or a dedicated NETA certificate service.
-
-The coordinator remains responsible for deciding which certificate identity is trusted for a given NETA agent and for enforcing lifecycle state during ingestion.
-
-### Exit criteria
-
-C4.7 is complete when:
-
-- certificate validity dates are recorded for enrolled agents;
-- operator views clearly show valid/expiring/expired state;
-- configurable 30-day and 7-day warning behavior exists;
-- expired certificates cannot successfully authenticate normal agent ingestion;
-- a documented rotation flow replaces an agent certificate without changing `AgentId`;
-- the previous certificate is rejected after successful rotation;
-- rotation and lifecycle changes are auditable;
-- health checks report expiry risk without mutating fleet state;
-- recovery behavior is tested for interrupted/failed rotation.
+Rotation is an explicit operator action. Because activating the replacement fingerprint immediately retires the old identity, operators should generate and securely retain the new private key/CSR before rotation and install the returned chain immediately. If installation fails, the same protected rotation mechanism can issue another replacement CSR; revocation/reactivation remains separate from certificate replacement.
 
 ## Boundary after C4
 
-C4 remains primarily fleet administration and local coordinator investigation. Cross-agent reasoning belongs to the next coordinator phase, including persisted corroboration requests, fan-out/lifecycle, responses, and HOST_LOCAL / SITE_LOCAL / REGIONAL / GLOBAL reasoning.
+C4 is complete as the coordinator fleet-administration and local-investigation phase. Cross-agent reasoning belongs to the next coordinator phase, including persisted corroboration requests, fan-out/lifecycle, responses, and HOST_LOCAL / SITE_LOCAL / REGIONAL / GLOBAL reasoning.
