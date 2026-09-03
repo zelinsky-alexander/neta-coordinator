@@ -37,11 +37,17 @@ public class MessageIngestService {
     @Transactional
     public IngestResult ingest(MessageEnvelope envelope, String peerCertificateSha256) {
         validator.validate(envelope);
-        var agents = jdbc.query("SELECT certificate_sha256,status,last_sequence FROM agents WHERE agent_id=? FOR UPDATE",
-                (rs, n) -> new AgentState(rs.getString(1), rs.getString(2), rs.getLong(3)), envelope.agentId());
+        var agents = jdbc.query("SELECT certificate_sha256,status,last_sequence,certificate_not_before,certificate_not_after FROM agents WHERE agent_id=? FOR UPDATE",
+                (rs, n) -> new AgentState(rs.getString(1), rs.getString(2), rs.getLong(3),
+                        toInstant(rs.getTimestamp(4)), toInstant(rs.getTimestamp(5))), envelope.agentId());
         if (agents.size() != 1 || !"ACTIVE".equals(agents.getFirst().status()))
             throw ProtocolException.unauthorized("agent is not active or registered");
         AgentState agent = agents.getFirst();
+        Instant now = Instant.now();
+        if (agent.certificateNotBefore() != null && now.isBefore(agent.certificateNotBefore()))
+            throw ProtocolException.unauthorized("enrolled agent certificate is not yet valid");
+        if (agent.certificateNotAfter() != null && !now.isBefore(agent.certificateNotAfter()))
+            throw ProtocolException.unauthorized("enrolled agent certificate is expired");
         if (properties.security().requireClientCertificate()) {
             if (peerCertificateSha256 == null) throw ProtocolException.unauthorized("client certificate is required");
             if (!agent.certificateSha256().equalsIgnoreCase(peerCertificateSha256))
@@ -105,21 +111,14 @@ public class MessageIngestService {
 
             String findingKey = text(p, "finding_key");
             if (findingKey == null || findingKey.isBlank()) {
-                findingKey = host + ":" + port + "|" + nullSafe(text(p, "performance_verdict")) + "|" +
-                        nullSafe(text(p, "trust_verdict"));
+                findingKey = host + ":" + port + "|" + nullSafe(text(p, "performance_verdict")) + "|" + nullSafe(text(p, "trust_verdict"));
             }
 
             jdbc.update("""
-                    UPDATE findings
-                    SET finding_key=?
+                    UPDATE findings SET finding_key=?
                     WHERE agent_id=? AND finding_id=? AND finding_key<>?
-                      AND NOT EXISTS (
-                          SELECT 1 FROM findings other
-                          WHERE other.agent_id=? AND other.finding_key=? AND other.finding_id<>?
-                      )
-                    """,
-                    findingKey, e.agentId(), findingId, findingKey,
-                    e.agentId(), findingKey, findingId);
+                      AND NOT EXISTS (SELECT 1 FROM findings other WHERE other.agent_id=? AND other.finding_key=? AND other.finding_id<>?)
+                    """, findingKey, e.agentId(), findingId, findingKey, e.agentId(), findingKey, findingId);
 
             jdbc.update("""
                     INSERT INTO findings(
@@ -137,13 +136,10 @@ public class MessageIngestService {
                         rule_set=EXCLUDED.rule_set,
                         evidence_root=EXCLUDED.evidence_root,
                         payload=EXCLUDED.payload,
-                        last_seen=now(),
-                        occurrence_count=findings.occurrence_count+1,
-                        status='ACTIVE'
+                        last_seen=now(), occurrence_count=findings.occurrence_count+1, status='ACTIVE'
                     """,
                     findingId, findingKey, e.messageId(), e.agentId(), host, port,
-                    timestamp(p.path("observation_window").path("from")),
-                    timestamp(p.path("observation_window").path("to")),
+                    timestamp(p.path("observation_window").path("from")), timestamp(p.path("observation_window").path("to")),
                     json(p.path("changes")), text(p,"performance_verdict"), text(p,"trust_verdict"),
                     json(p.path("rule_set")), text(p,"evidence_root"), json(p));
         } else if (e.messageType() == MessageType.CORROBORATION_RESPONSE) {
@@ -163,31 +159,19 @@ public class MessageIngestService {
     }
 
     private String json(Object value) {
-        try {
-            return mapper.writeValueAsString(value);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalArgumentException("message cannot be serialized", ex);
-        }
+        try { return mapper.writeValueAsString(value); }
+        catch (JsonProcessingException ex) { throw new IllegalArgumentException("message cannot be serialized", ex); }
     }
-
-    private static String text(JsonNode node, String field) {
-        JsonNode v = node.path(field);
-        return v.isTextual() ? v.asText() : null;
-    }
-
-    private static String nullSafe(String value) {
-        return value == null ? "" : value;
-    }
-
+    private static String text(JsonNode node, String field) { JsonNode v = node.path(field); return v.isTextual() ? v.asText() : null; }
+    private static String nullSafe(String value) { return value == null ? "" : value; }
     private static Timestamp timestamp(JsonNode node) {
         if (!node.isTextual() || node.asText().isBlank()) return null;
-        try {
-            return Timestamp.from(Instant.parse(node.asText()));
-        } catch (RuntimeException e) {
-            throw ProtocolException.badRequest("invalid observation timestamp");
-        }
+        try { return Timestamp.from(Instant.parse(node.asText())); }
+        catch (RuntimeException e) { throw ProtocolException.badRequest("invalid observation timestamp"); }
     }
+    private static Instant toInstant(Timestamp ts) { return ts == null ? null : ts.toInstant(); }
 
-    private record AgentState(String certificateSha256, String status, long lastSequence) {}
+    private record AgentState(String certificateSha256, String status, long lastSequence,
+                              Instant certificateNotBefore, Instant certificateNotAfter) {}
     public record IngestResult(String messageId, String status, Instant receivedAt) {}
 }
