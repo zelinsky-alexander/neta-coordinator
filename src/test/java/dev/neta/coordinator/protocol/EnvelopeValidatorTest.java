@@ -15,7 +15,7 @@ class EnvelopeValidatorTest {
     private static final Instant NOW = Instant.parse("2026-08-30T18:00:00Z");
     private final EnvelopeValidator validator = new EnvelopeValidator(
             new CoordinatorProperties("fleet-test", "", Duration.ofHours(1), null,
-                    new CoordinatorProperties.Security(true, Duration.ofMinutes(2), Duration.ofMinutes(15))),
+                    new CoordinatorProperties.Security(true, Duration.ofMinutes(2), Duration.ofMinutes(15)), null),
             Clock.fixed(NOW, ZoneOffset.UTC));
     private final ObjectMapper mapper = new ObjectMapper();
 
