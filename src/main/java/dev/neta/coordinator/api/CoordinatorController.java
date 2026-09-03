@@ -32,6 +32,6 @@ public class CoordinatorController {
 
     @PostMapping("/messages")
     public IngestResult message(@RequestBody MessageEnvelope envelope, HttpServletRequest request) {
-        return ingest.ingest(envelope, certificates.sha256Fingerprint(request).orElse(null));
+        return ingest.ingest(envelope, certificates.peerCertificate(request).orElse(null));
     }
 }
