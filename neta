@@ -17,126 +17,81 @@ read_env_value() {
 }
 
 curl_args=(-fsS --connect-timeout 1 --max-time 10)
-
 if [[ -n "${NETA_OPERATOR_CA:-}" ]]; then
   curl_args+=(--cacert "$NETA_OPERATOR_CA")
 elif [[ -f deploy/certs/fleet-ca.crt ]]; then
   curl_args+=(--cacert deploy/certs/fleet-ca.crt)
 fi
-if [[ -n "${NETA_OPERATOR_CERT:-}" ]]; then
-  curl_args+=(--cert "$NETA_OPERATOR_CERT")
-fi
-if [[ -n "${NETA_OPERATOR_KEY:-}" ]]; then
-  curl_args+=(--key "$NETA_OPERATOR_KEY")
-fi
+[[ -n "${NETA_OPERATOR_CERT:-}" ]] && curl_args+=(--cert "$NETA_OPERATOR_CERT")
+[[ -n "${NETA_OPERATOR_KEY:-}" ]] && curl_args+=(--key "$NETA_OPERATOR_KEY")
 
 resolve_base_url() {
-  if [[ -n "${NETA_COORDINATOR_URL:-}" ]]; then
-    printf '%s' "${NETA_COORDINATOR_URL%/}"
-    return
-  fi
-
+  if [[ -n "${NETA_COORDINATOR_URL:-}" ]]; then printf '%s' "${NETA_COORDINATOR_URL%/}"; return; fi
   local port="${NETA_HOST_PORT:-}"
-  if [[ -z "$port" ]]; then
-    port="$(read_env_value NETA_HOST_PORT .env || true)"
-  fi
+  [[ -z "$port" ]] && port="$(read_env_value NETA_HOST_PORT .env || true)"
   port="${port:-8080}"
-
-  local https="https://127.0.0.1:${port}"
-  local http="http://127.0.0.1:${port}"
-  if curl "${curl_args[@]}" -o /dev/null "$https/actuator/health" 2>/dev/null; then
-    printf '%s' "$https"
-  elif curl "${curl_args[@]}" -o /dev/null "$http/actuator/health" 2>/dev/null; then
-    printf '%s' "$http"
-  else
-    printf 'NETA coordinator is not reachable on 127.0.0.1:%s. Check: sudo docker compose ps\n' "$port" >&2
-    exit 1
-  fi
+  local https="https://127.0.0.1:${port}" http="http://127.0.0.1:${port}"
+  if curl "${curl_args[@]}" -o /dev/null "$https/actuator/health" 2>/dev/null; then printf '%s' "$https"
+  elif curl "${curl_args[@]}" -o /dev/null "$http/actuator/health" 2>/dev/null; then printf '%s' "$http"
+  else printf 'NETA coordinator is not reachable on 127.0.0.1:%s. Check: sudo docker compose ps\n' "$port" >&2; exit 1; fi
 }
 
-require_arg() {
-  local value="${1:-}" message="$2"
-  if [[ -z "$value" ]]; then
-    echo "$message" >&2
-    exit 2
-  fi
-}
-
-validate_limit() {
-  local limit="$1" label="$2"
-  if ! [[ "$limit" =~ ^[0-9]+$ ]] || (( limit < 1 || limit > 100 )); then
-    echo "$label limit must be an integer from 1 to 100" >&2
-    exit 2
-  fi
-}
+require_arg() { local value="${1:-}" message="$2"; [[ -n "$value" ]] || { echo "$message" >&2; exit 2; }; }
+validate_limit() { local limit="$1" label="$2"; [[ "$limit" =~ ^[0-9]+$ ]] && (( limit >= 1 && limit <= 100 )) || { echo "$label limit must be an integer from 1 to 100" >&2; exit 2; }; }
 
 usage() {
   cat <<'EOF'
 Usage:
   ./neta status
-  ./neta endpoints
+  ./neta endpoints [--status online|stale|offline|revoked|never_seen]
   ./neta endpoint <agent-id-or-name>
+  ./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]
   ./neta findings [limit]
   ./neta finding <finding-id>
   ./neta incidents [limit]
   ./neta incident <incident-id>
-
-The wrapper automatically reads NETA_HOST_PORT from .env and detects HTTP/HTTPS.
-
-Environment overrides:
-  NETA_COORDINATOR_URL  Explicit coordinator base URL
-  NETA_OPERATOR_CA      CA certificate for HTTPS
-  NETA_OPERATOR_CERT    Optional client certificate for mTLS
-  NETA_OPERATOR_KEY     Optional client key for mTLS
 EOF
 }
 
 command="${1:-help}"
 case "$command" in
   status)
-    base_url="$(resolve_base_url)"
-    exec curl "${curl_args[@]}" "$base_url/api/v1/operator/status"
-    ;;
+    base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/status" ;;
   endpoints)
     base_url="$(resolve_base_url)"
-    exec curl "${curl_args[@]}" "$base_url/api/v1/operator/endpoints"
-    ;;
+    if [[ "${2:-}" == "--status" ]]; then
+      require_arg "${3:-}" "usage: ./neta endpoints --status <state>"
+      exec curl "${curl_args[@]}" --get --data-urlencode "status=$3" "$base_url/api/v1/operator/endpoints-filtered"
+    fi
+    exec curl "${curl_args[@]}" "$base_url/api/v1/operator/endpoints" ;;
   endpoint)
-    agent="${2:-}"
-    require_arg "$agent" "usage: ./neta endpoint <agent-id-or-name>"
+    agent="${2:-}"; require_arg "$agent" "usage: ./neta endpoint <agent-id-or-name>"; base_url="$(resolve_base_url)"
+    curl "${curl_args[@]}" --get --data-urlencode "agent=$agent" "$base_url/api/v1/operator/endpoint"
+    curl "${curl_args[@]}" --get --data-urlencode "agent=$agent" "$base_url/api/v1/operator/endpoint-context" ;;
+  endpoint-history)
+    agent="${2:-}"; require_arg "$agent" "usage: ./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]"
+    shift 2; last="24h"; type=""; limit="100"
+    while (( $# )); do
+      case "$1" in
+        --last) require_arg "${2:-}" "--last requires a value"; last="$2"; shift 2 ;;
+        --type) require_arg "${2:-}" "--type requires a value"; type="$2"; shift 2 ;;
+        --limit) require_arg "${2:-}" "--limit requires a value"; limit="$2"; shift 2 ;;
+        *) echo "unknown endpoint-history option: $1" >&2; exit 2 ;;
+      esac
+    done
+    [[ "$limit" =~ ^[0-9]+$ ]] && (( limit >= 1 && limit <= 500 )) || { echo "history limit must be 1..500" >&2; exit 2; }
     base_url="$(resolve_base_url)"
-    exec curl "${curl_args[@]}" --get --data-urlencode "agent=$agent" "$base_url/api/v1/operator/endpoint"
-    ;;
+    args=("${curl_args[@]}" --get --data-urlencode "agent=$agent" --data-urlencode "last=$last" --data-urlencode "limit=$limit")
+    [[ -n "$type" ]] && args+=(--data-urlencode "type=$type")
+    exec curl "${args[@]}" "$base_url/api/v1/operator/endpoint-history" ;;
   findings)
-    limit="${2:-10}"
-    validate_limit "$limit" "finding"
-    base_url="$(resolve_base_url)"
-    exec curl "${curl_args[@]}" "$base_url/api/v1/operator/findings?limit=$limit"
-    ;;
+    limit="${2:-10}"; validate_limit "$limit" "finding"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/findings?limit=$limit" ;;
   finding)
-    finding_id="${2:-}"
-    require_arg "$finding_id" "usage: ./neta finding <finding-id>"
-    base_url="$(resolve_base_url)"
-    exec curl "${curl_args[@]}" --get --data-urlencode "id=$finding_id" "$base_url/api/v1/operator/finding"
-    ;;
+    finding_id="${2:-}"; require_arg "$finding_id" "usage: ./neta finding <finding-id>"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "id=$finding_id" "$base_url/api/v1/operator/finding" ;;
   incidents)
-    limit="${2:-20}"
-    validate_limit "$limit" "incident"
-    base_url="$(resolve_base_url)"
-    exec curl "${curl_args[@]}" "$base_url/api/v1/operator/incidents?limit=$limit"
-    ;;
+    limit="${2:-20}"; validate_limit "$limit" "incident"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/incidents?limit=$limit" ;;
   incident)
-    incident_id="${2:-}"
-    require_arg "$incident_id" "usage: ./neta incident <incident-id>"
-    base_url="$(resolve_base_url)"
-    exec curl "${curl_args[@]}" --get --data-urlencode "id=$incident_id" "$base_url/api/v1/operator/incident"
-    ;;
-  help|-h|--help)
-    usage
-    ;;
-  *)
-    echo "unknown command: $command" >&2
-    usage >&2
-    exit 2
-    ;;
+    incident_id="${2:-}"; require_arg "$incident_id" "usage: ./neta incident <incident-id>"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "id=$incident_id" "$base_url/api/v1/operator/incident" ;;
+  help|-h|--help) usage ;;
+  *) echo "unknown command: $command" >&2; usage >&2; exit 2 ;;
 esac
