@@ -2,6 +2,7 @@ package dev.neta.coordinator.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.neta.coordinator.config.CoordinatorProperties;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
@@ -20,15 +21,16 @@ import org.springframework.web.server.ResponseStatusException;
 @RestController
 @RequestMapping("/api/v1/operator")
 public class OperatorViewController {
-    private static final Duration ONLINE_WINDOW = Duration.ofMinutes(2);
     private static final int MAX_FINDING_LIMIT = 100;
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private final CoordinatorProperties.Liveness liveness;
 
-    public OperatorViewController(JdbcTemplate jdbc, ObjectMapper mapper) {
+    public OperatorViewController(JdbcTemplate jdbc, ObjectMapper mapper, CoordinatorProperties properties) {
         this.jdbc = jdbc;
         this.mapper = mapper;
+        this.liveness = properties.liveness();
     }
 
     @GetMapping(value = "/endpoints", produces = MediaType.TEXT_PLAIN_VALUE)
@@ -43,13 +45,13 @@ public class OperatorViewController {
                 timestampToInstant(rs.getTimestamp("last_seen_at")), rs.getString("last_heartbeat_payload")));
 
         StringBuilder out = new StringBuilder();
-        out.append(String.format("%-24s %-18s %-18s %-10s %s%n", "AGENT", "PLATFORM", "SITE", "STATUS", "LAST SEEN"));
-        out.append("------------------------------------------------------------------------------------------\n");
+        out.append(String.format("%-24s %-18s %-18s %-12s %s%n", "AGENT", "PLATFORM", "SITE", "STATUS", "LAST SEEN"));
+        out.append("--------------------------------------------------------------------------------------------\n");
         for (EndpointRow row : rows) {
             JsonNode heartbeat = parseJson(row.heartbeatPayload());
             String site = firstText(heartbeat, "site", "region", "location");
             if ("-".equals(site)) site = nestedText(heartbeat, "network", "site");
-            out.append(String.format("%-24s %-18s %-18s %-10s %s%n",
+            out.append(String.format("%-24s %-18s %-18s %-12s %s%n",
                     trim(agentName(row), 24), trim(platform(heartbeat), 18), trim(site, 18),
                     endpointStatus(row, now), relativeAge(row.lastSeenAt(), now)));
         }
@@ -87,6 +89,8 @@ public class OperatorViewController {
         line(out, "Status", endpointStatus(new EndpointRow(row.agentId(), row.displayName(), row.enrollmentStatus(), row.lastSeenAt(), row.heartbeatPayload()), now));
         line(out, "Enrollment", value(row.enrollmentStatus()));
         line(out, "Last seen", row.lastSeenAt() == null ? "never" : relativeAge(row.lastSeenAt(), now) + " (" + row.lastSeenAt() + ")");
+        line(out, "Online threshold", liveness.onlineThreshold().toString());
+        line(out, "Offline threshold", liveness.offlineThreshold().toString());
         line(out, "Enrolled", row.enrolledAt() == null ? "-" : row.enrolledAt().toString());
         line(out, "Last sequence", Long.toString(row.lastSequence()));
         line(out, "Certificate SHA-256", valueRaw(row.certificateSha256()));
@@ -217,9 +221,12 @@ public class OperatorViewController {
         return value.isTextual() && !value.asText().isBlank() ? value.asText() : "-";
     }
 
-    private static String endpointStatus(EndpointRow row, Instant now) {
+    private String endpointStatus(EndpointRow row, Instant now) {
         if (!"ACTIVE".equalsIgnoreCase(row.enrollmentStatus())) return "REVOKED";
-        if (row.lastSeenAt() != null && Duration.between(row.lastSeenAt(), now).compareTo(ONLINE_WINDOW) <= 0) return "ONLINE";
+        if (row.lastSeenAt() == null) return "NEVER_SEEN";
+        Duration age = Duration.between(row.lastSeenAt(), now);
+        if (age.isNegative() || age.compareTo(liveness.onlineThreshold()) <= 0) return "ONLINE";
+        if (age.compareTo(liveness.offlineThreshold()) <= 0) return "STALE";
         return "OFFLINE";
     }
 
