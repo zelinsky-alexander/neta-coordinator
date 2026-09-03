@@ -56,6 +56,7 @@ public class MessageIngestService {
         if (!heartbeat || storage.retainHeartbeats()) persistProtocolMessage(envelope);
 
         persistTypedPayload(envelope);
+        persistContact(envelope);
         if (heartbeat) {
             jdbc.update("UPDATE agents SET last_sequence=?, last_seen_at=now(), last_heartbeat_payload=CAST(? AS jsonb) WHERE agent_id=?",
                     envelope.sequence(), json(envelope.payload()), envelope.agentId());
@@ -69,6 +70,14 @@ public class MessageIngestService {
                     envelope.agentId(), envelope.messageId(), json(Map.of("message_type", envelope.messageType().wireName())));
         }
         return new IngestResult(envelope.messageId(), "ACCEPTED", Instant.now());
+    }
+
+    private void persistContact(MessageEnvelope envelope) {
+        jdbc.update("""
+                INSERT INTO endpoint_contact_history(agent_id,message_type,sequence,message_id,contact_at)
+                VALUES (?,?,?,?,now())
+                ON CONFLICT (agent_id,sequence) DO NOTHING
+                """, envelope.agentId(), envelope.messageType().wireName(), envelope.sequence(), envelope.messageId());
     }
 
     private void persistProtocolMessage(MessageEnvelope envelope) {
@@ -100,11 +109,6 @@ public class MessageIngestService {
                         nullSafe(text(p, "trust_verdict"));
             }
 
-            // Upgrade compatibility: pre-MS4.1 and early-MS4.1 rows may already have this
-            // finding_id with either a backfilled or coordinator-fallback key. If an upgraded
-            // agent supplies the semantic key, let the existing row adopt it before the normal
-            // (agent_id,finding_key) upsert. The NOT EXISTS guard prevents stealing a key that
-            // already belongs to another logical finding for the same agent.
             jdbc.update("""
                     UPDATE findings
                     SET finding_key=?
