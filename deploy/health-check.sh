@@ -52,11 +52,13 @@ profile="$("${compose[@]}" exec -T coordinator printenv SPRING_PROFILES_ACTIVE 2
 require_cert="$("${compose[@]}" exec -T coordinator printenv NETA_REQUIRE_CLIENT_CERTIFICATE 2>/dev/null || true)"
 key_store="$("${compose[@]}" exec -T coordinator printenv NETA_TLS_KEY_STORE 2>/dev/null || true)"
 trust_store="$("${compose[@]}" exec -T coordinator printenv NETA_TLS_TRUST_STORE 2>/dev/null || true)"
+admin_token_configured="$("${compose[@]}" exec -T coordinator sh -c 'test -n "$NETA_OPERATOR_ADMIN_TOKEN" && echo yes || echo no' 2>/dev/null || true)"
 
 [[ "$profile" == "mtls" ]] && pass "Spring profile: mtls" || failed "Spring profile is '${profile:-<unset>}' instead of mtls"
 [[ "$require_cert" == "true" ]] && pass "client certificate requirement enabled" || failed "NETA_REQUIRE_CLIENT_CERTIFICATE is not true"
 [[ -n "$key_store" ]] && pass "TLS key store configured" || failed "TLS key store is not configured"
 [[ -n "$trust_store" ]] && pass "TLS trust store configured" || failed "TLS trust store is not configured"
+[[ "$admin_token_configured" == "yes" ]] && pass "operator admin mutations enabled" || warning "NETA_OPERATOR_ADMIN_TOKEN is not configured; revoke/reactivate are disabled"
 
 host_port="$(grep -E '^[[:space:]]*NETA_HOST_PORT=' .env | tail -n1 | cut -d= -f2- | tr -d '\r"' || true)"
 host_port="${host_port:-8080}"
@@ -85,6 +87,12 @@ else
   failed "operator API: endpoints query failed: $(cat /tmp/neta-coordinator-endpoints-err.$$ 2>/dev/null || true)"
 fi
 rm -f /tmp/neta-coordinator-endpoints.$$ /tmp/neta-coordinator-endpoints-err.$$
+
+if ./neta agents >/dev/null 2>&1; then
+  pass "operator API: agent administration read path succeeded"
+else
+  failed "operator API: agent administration read path failed"
+fi
 
 if ./neta findings 1 >/dev/null 2>&1; then
   pass "operator API: findings query succeeded"
