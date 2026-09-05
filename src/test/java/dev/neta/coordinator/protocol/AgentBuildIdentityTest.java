@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -58,6 +59,25 @@ class AgentBuildIdentityTest {
         build.put("arch", "amd64");
 
         assertTrue(AgentBuildIdentity.from(envelope(MessageType.AGENT_HELLO, payload)).isPresent());
+    }
+
+    @Test
+    void optionalFieldsMayBeAbsent() {
+        ObjectNode payload = mapper.createObjectNode();
+        ObjectNode build = payload.putObject("build");
+        build.put("version", "1.4.0");
+        build.put("build_id", "20260905.1");
+        build.put("os", "linux");
+        build.put("arch", "amd64");
+
+        AgentBuildIdentity identity = AgentBuildIdentity.from(envelope(MessageType.HEARTBEAT, payload)).orElseThrow();
+
+        assertNull(identity.gitCommit());
+        assertNull(identity.artifactSha256());
+        assertNull(identity.protocolVersion());
+        assertNull(identity.schemaVersion());
+        assertTrue(identity.features().isArray());
+        assertTrue(identity.features().isEmpty());
     }
 
     @Test
