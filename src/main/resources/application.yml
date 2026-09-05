@@ -42,3 +42,11 @@ neta:
     protocol-retention: ${NETA_PROTOCOL_RETENTION:P7D}
     accepted-audit-retention: ${NETA_ACCEPTED_AUDIT_RETENTION:P30D}
     cleanup-interval: ${NETA_STORAGE_CLEANUP_INTERVAL:PT1H}
+  releases:
+    owner: ${NETA_AGENT_GITHUB_OWNER:zelinsky-alexander}
+    repository: ${NETA_AGENT_GITHUB_REPOSITORY:neta-agent}
+    api-base: ${NETA_GITHUB_API_BASE:https://api.github.com}
+    release-tag-template: ${NETA_AGENT_RELEASE_TAG_TEMPLATE:v%s}
+    development-tag-template: ${NETA_AGENT_DEVELOPMENT_TAG_TEMPLATE:dev-%s}
+    manifest-asset: ${NETA_AGENT_RELEASE_MANIFEST:release-manifest.json}
+    github-token: ${NETA_GITHUB_TOKEN:}

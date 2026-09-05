@@ -52,7 +52,8 @@ public class CoordinatorCliRunner implements ApplicationRunner {
     private void printEndpoints() {
         Instant now = Instant.now();
         List<EndpointRow> rows = jdbc.query("""
-                SELECT agent_id, display_name, status, last_seen_at, last_heartbeat_payload::text
+                SELECT agent_id, display_name, status, last_seen_at, last_heartbeat_payload::text,
+                       agent_version, agent_build_id, agent_os, agent_arch
                 FROM agents
                 ORDER BY COALESCE(NULLIF(display_name, ''), agent_id)
                 """, (rs, rowNum) -> new EndpointRow(
@@ -60,19 +61,25 @@ public class CoordinatorCliRunner implements ApplicationRunner {
                 rs.getString("display_name"),
                 rs.getString("status"),
                 timestampToInstant(rs.getTimestamp("last_seen_at")),
-                rs.getString("last_heartbeat_payload")));
+                rs.getString("last_heartbeat_payload"),
+                rs.getString("agent_version"),
+                rs.getString("agent_build_id"),
+                rs.getString("agent_os"),
+                rs.getString("agent_arch")));
 
-        System.out.printf("%-24s %-18s %-18s %-10s %s%n", "AGENT", "PLATFORM", "SITE", "STATUS", "LAST SEEN");
-        System.out.println("------------------------------------------------------------------------------------------");
+        System.out.printf("%-24s %-12s %-16s %-18s %-18s %-10s %s%n",
+                "AGENT", "VERSION", "BUILD", "PLATFORM", "SITE", "STATUS", "LAST SEEN");
+        System.out.println("--------------------------------------------------------------------------------------------------------------------");
         for (EndpointRow row : rows) {
             JsonNode heartbeat = parseJson(row.heartbeatPayload());
-            String platform = platform(heartbeat);
-            String site = firstText(heartbeat,
-                    "site", "region", "location");
+            String platform = platform(row, heartbeat);
+            String site = firstText(heartbeat, "site", "region", "location");
             if ("-".equals(site)) site = nestedText(heartbeat, "network", "site");
 
-            System.out.printf("%-24s %-18s %-18s %-10s %s%n",
+            System.out.printf("%-24s %-12s %-16s %-18s %-18s %-10s %s%n",
                     trim(agentName(row), 24),
+                    trim(valueOrDashRaw(row.agentVersion()), 12),
+                    trim(valueOrDashRaw(row.agentBuildId()), 16),
                     trim(platform, 18),
                     trim(site, 18),
                     endpointStatus(row, now),
@@ -150,7 +157,7 @@ public class CoordinatorCliRunner implements ApplicationRunner {
 
     private static void printHelp() {
         System.out.println("NETA Coordinator operator CLI");
-        System.out.println("  endpoints       Show enrolled endpoints and last-seen status");
+        System.out.println("  endpoints       Show enrolled endpoints, build identity, and last-seen status");
         System.out.println("  findings [N]    Show latest findings (default 10, max 100)");
         System.out.println("  help             Show this help");
     }
@@ -164,7 +171,11 @@ public class CoordinatorCliRunner implements ApplicationRunner {
         }
     }
 
-    private static String platform(JsonNode heartbeat) {
+    private static String platform(EndpointRow row, JsonNode heartbeat) {
+        if (row.agentOs() != null && !row.agentOs().isBlank()) {
+            return row.agentArch() == null || row.agentArch().isBlank()
+                    ? row.agentOs() : row.agentOs() + "/" + row.agentArch();
+        }
         String platform = firstText(heartbeat, "platform", "os");
         if ("-".equals(platform)) platform = nestedText(heartbeat, "host", "platform");
         String architecture = firstText(heartbeat, "architecture", "arch");
@@ -216,6 +227,10 @@ public class CoordinatorCliRunner implements ApplicationRunner {
         return value == null || value.isBlank() ? "-" : value.toUpperCase(Locale.ROOT);
     }
 
+    private static String valueOrDashRaw(String value) {
+        return value == null || value.isBlank() ? "-" : value;
+    }
+
     private static String trim(String value, int width) {
         if (value == null) return "-";
         if (value.length() <= width) return value;
@@ -227,7 +242,8 @@ public class CoordinatorCliRunner implements ApplicationRunner {
     }
 
     private record EndpointRow(String agentId, String displayName, String enrollmentStatus,
-                               Instant lastSeenAt, String heartbeatPayload) {}
+                               Instant lastSeenAt, String heartbeatPayload, String agentVersion,
+                               String agentBuildId, String agentOs, String agentArch) {}
 
     private record FindingTotals(long total, long active, long suspicious) {}
 
