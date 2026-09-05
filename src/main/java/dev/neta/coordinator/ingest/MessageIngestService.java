@@ -1,5 +1,6 @@
 package dev.neta.coordinator.ingest;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,6 +12,8 @@ import dev.neta.coordinator.protocol.MessageEnvelope;
 import dev.neta.coordinator.protocol.MessageType;
 import dev.neta.coordinator.protocol.ProtocolException;
 import dev.neta.coordinator.security.PeerCertificateService.PeerCertificate;
+import dev.neta.coordinator.upgrade.AgentUpgradeDeliveryService;
+import dev.neta.coordinator.upgrade.AgentUpgradeInstruction;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Map;
@@ -26,14 +29,17 @@ public class MessageIngestService {
     private final EnvelopeValidator validator;
     private final CoordinatorProperties properties;
     private final CoordinatorStorageProperties storage;
+    private final AgentUpgradeDeliveryService upgradeDelivery;
 
     public MessageIngestService(JdbcTemplate jdbc, ObjectMapper mapper, EnvelopeValidator validator,
-                                CoordinatorProperties properties, CoordinatorStorageProperties storage) {
+                                CoordinatorProperties properties, CoordinatorStorageProperties storage,
+                                AgentUpgradeDeliveryService upgradeDelivery) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.validator = validator;
         this.properties = properties;
         this.storage = storage;
+        this.upgradeDelivery = upgradeDelivery;
     }
 
     @Transactional
@@ -97,7 +103,12 @@ public class MessageIngestService {
             jdbc.update("INSERT INTO audit_events(event_type,agent_id,message_id,details) VALUES ('MESSAGE_ACCEPTED',?,?,CAST(? AS jsonb))",
                     envelope.agentId(), envelope.messageId(), json(Map.of("message_type", envelope.messageType().wireName())));
         }
-        return new IngestResult(envelope.messageId(), "ACCEPTED", Instant.now());
+
+        AgentUpgradeInstruction upgrade = null;
+        if (heartbeat || envelope.messageType() == MessageType.AGENT_HELLO) {
+            upgrade = upgradeDelivery.instructionFor(envelope.agentId()).orElse(null);
+        }
+        return new IngestResult(envelope.messageId(), "ACCEPTED", Instant.now(), upgrade);
     }
 
     private void persistBuildIdentity(String agentId, AgentBuildIdentity build) {
@@ -175,5 +186,7 @@ public class MessageIngestService {
 
     private record AgentState(String certificateSha256, String status, long lastSequence,
                               Instant certificateNotBefore, Instant certificateNotAfter) {}
-    public record IngestResult(String messageId, String status, Instant receivedAt) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record IngestResult(String messageId, String status, Instant receivedAt, AgentUpgradeInstruction upgrade) {}
 }
