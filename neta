@@ -41,6 +41,12 @@ Usage:
   ./neta agent <agent-id-or-name>
   ./neta agent revoke <agent-id-or-name> --reason TEXT --yes
   ./neta agent reactivate <agent-id-or-name> --reason TEXT --yes
+  ./neta agent upgrade <agent-id-or-name> --version VERSION
+  ./neta agent upgrade <agent-id-or-name> --ref GIT_REF --allow-development
+  ./neta upgrades [agent-id-or-name]
+  ./neta upgrade <upgrade-id>
+  ./neta releases [limit]
+  ./neta release resolve --source release|git-ref --ref REF --os OS --arch ARCH
   ./neta certificates [--expiring 30d]
   ./neta certificate <agent-id-or-name>
   ./neta certificate rotate <agent-id-or-name> --csr FILE --out FILE --reason TEXT --yes
@@ -70,10 +76,35 @@ case "$command" in
     [[ "$limit" =~ ^[0-9]+$ ]] && ((limit>=1&&limit<=500)) || { echo "history limit must be 1..500" >&2; exit 2; }; base_url="$(resolve_base_url)"; args=("${curl_args[@]}" --get --data-urlencode "agent=$agent" --data-urlencode "last=$last" --data-urlencode "limit=$limit"); [[ -n "$type" ]] && args+=(--data-urlencode "type=$type"); exec curl "${args[@]}" "$base_url/api/v1/operator/endpoint-history" ;;
   agents) base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/agents" ;;
   agent)
-    action="${2:-}"; if [[ "$action" != "revoke" && "$action" != "reactivate" ]]; then require_arg "$action" "usage: ./neta agent <agent-id-or-name>"; base_url="$(resolve_base_url)"; curl "${curl_args[@]}" --get --data-urlencode "agent=$action" "$base_url/api/v1/operator/agent-admin"; exec curl "${curl_args[@]}" --get --data-urlencode "agent=$action" "$base_url/api/v1/operator/certificate"; fi
+    action="${2:-}"
+    if [[ "$action" == "upgrade" ]]; then
+      agent="${3:-}"; require_arg "$agent" "usage: ./neta agent upgrade <agent> --version VERSION | --ref GIT_REF --allow-development"; shift 3
+      version=""; ref=""; allow_development="false"
+      while (($#)); do case "$1" in --version) require_arg "${2:-}" "--version requires a value"; version="$2"; shift 2;; --ref) require_arg "${2:-}" "--ref requires a value"; ref="$2"; shift 2;; --allow-development) allow_development="true"; shift;; *) echo "unknown agent upgrade option: $1" >&2; exit 2;; esac; done
+      if [[ -n "$version" && -n "$ref" ]]; then echo "specify exactly one of --version or --ref" >&2; exit 2; fi
+      if [[ -z "$version" && -z "$ref" ]]; then echo "one of --version or --ref is required" >&2; exit 2; fi
+      if [[ -n "$version" && "$allow_development" == "true" ]]; then echo "--allow-development is only valid with --ref" >&2; exit 2; fi
+      if [[ -n "$ref" && "$allow_development" != "true" ]]; then echo "--ref requires --allow-development" >&2; exit 2; fi
+      token="$(admin_token)"; base_url="$(resolve_base_url)"; args=("${curl_args[@]}" -X POST -H "X-NETA-Admin-Token: $token" --data-urlencode "agent=$agent")
+      if [[ -n "$version" ]]; then args+=(--data-urlencode "source=release" --data-urlencode "ref=$version"); else args+=(--data-urlencode "source=git-ref" --data-urlencode "ref=$ref" --data-urlencode "allowDevelopment=true"); fi
+      exec curl "${args[@]}" "$base_url/api/v1/operator/agent-upgrade"
+    fi
+    if [[ "$action" != "revoke" && "$action" != "reactivate" ]]; then require_arg "$action" "usage: ./neta agent <agent-id-or-name>"; base_url="$(resolve_base_url)"; curl "${curl_args[@]}" --get --data-urlencode "agent=$action" "$base_url/api/v1/operator/agent-admin"; exec curl "${curl_args[@]}" --get --data-urlencode "agent=$action" "$base_url/api/v1/operator/certificate"; fi
     agent="${3:-}"; require_arg "$agent" "usage: ./neta agent $action <agent-id-or-name> --reason TEXT --yes"; shift 3; reason=""; yes="false"
     while (($#)); do case "$1" in --reason) require_arg "${2:-}" "--reason requires a value"; reason="$2"; shift 2;; --yes) yes="true"; shift;; *) echo "unknown agent $action option: $1" >&2; exit 2;; esac; done
     require_arg "$reason" "--reason is required"; [[ "$yes" == "true" ]] || { echo "refusing agent state change without --yes" >&2; exit 2; }; token="$(admin_token)"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" -X POST -H "X-NETA-Admin-Token: $token" --data-urlencode "agent=$agent" --data-urlencode "reason=$reason" "$base_url/api/v1/operator/agent-$action" ;;
+  upgrades)
+    agent="${2:-}"; base_url="$(resolve_base_url)"; args=("${curl_args[@]}" --get); [[ -n "$agent" ]] && args+=(--data-urlencode "agent=$agent"); exec curl "${args[@]}" "$base_url/api/v1/operator/upgrades" ;;
+  upgrade)
+    upgrade_id="${2:-}"; require_arg "$upgrade_id" "usage: ./neta upgrade <upgrade-id>"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "id=$upgrade_id" "$base_url/api/v1/operator/upgrade" ;;
+  releases)
+    limit="${2:-20}"; validate_limit "$limit" "release"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "limit=$limit" "$base_url/api/v1/operator/releases" ;;
+  release)
+    action="${2:-}"; [[ "$action" == "resolve" ]] || { echo "usage: ./neta release resolve --source release|git-ref --ref REF --os OS --arch ARCH" >&2; exit 2; }; shift 2
+    source="release"; ref=""; os=""; arch=""
+    while (($#)); do case "$1" in --source) require_arg "${2:-}" "--source requires release or git-ref"; source="$2"; shift 2;; --ref) require_arg "${2:-}" "--ref requires a value"; ref="$2"; shift 2;; --os) require_arg "${2:-}" "--os requires a value"; os="$2"; shift 2;; --arch) require_arg "${2:-}" "--arch requires a value"; arch="$2"; shift 2;; *) echo "unknown release resolve option: $1" >&2; exit 2;; esac; done
+    [[ "$source" == "release" || "$source" == "git-ref" ]] || { echo "--source must be release or git-ref" >&2; exit 2; }; require_arg "$ref" "--ref is required"; require_arg "$os" "--os is required"; require_arg "$arch" "--arch is required"
+    base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "source=$source" --data-urlencode "ref=$ref" --data-urlencode "os=$os" --data-urlencode "arch=$arch" "$base_url/api/v1/operator/release-resolve" ;;
   certificates)
     shift; expiring=""; while (($#)); do case "$1" in --expiring) require_arg "${2:-}" "--expiring requires a value"; expiring="$2"; shift 2;; *) echo "unknown certificates option: $1" >&2; exit 2;; esac; done; base_url="$(resolve_base_url)"; args=("${curl_args[@]}" --get); [[ -n "$expiring" ]] && args+=(--data-urlencode "expiring=$expiring"); exec curl "${args[@]}" "$base_url/api/v1/operator/certificates" ;;
   certificate)

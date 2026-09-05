@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component;
 public final class EnvelopeValidator {
     private static final Set<MessageType> AGENT_TO_COORDINATOR = EnumSet.of(
             MessageType.AGENT_HELLO, MessageType.HEARTBEAT, MessageType.FINDING_ANNOUNCEMENT,
-            MessageType.CORROBORATION_RESPONSE, MessageType.EVIDENCE_SUMMARY);
+            MessageType.CORROBORATION_RESPONSE, MessageType.EVIDENCE_SUMMARY, MessageType.UPGRADE_PROGRESS);
     private final CoordinatorProperties properties;
     private final Clock clock;
 
@@ -53,6 +53,9 @@ public final class EnvelopeValidator {
             requirePayloadText(e, "status");
             if (e.correlationId() == null || !e.correlationId().equals(e.payload().path("request_id").asText()))
                 throw ProtocolException.badRequest("correlation_id must match CorroborationResponse.request_id");
+        } else if (e.messageType() == MessageType.UPGRADE_PROGRESS) {
+            requirePayloadText(e, "upgrade_id");
+            requirePayloadText(e, "status");
         }
     }
 
