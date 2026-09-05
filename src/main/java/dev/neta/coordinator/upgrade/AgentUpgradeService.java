@@ -53,6 +53,7 @@ public class AgentUpgradeService {
         if (active != null && active > 0) throw new UpgradeRequestException("agent already has an active upgrade");
 
         UUID upgradeId = UUID.randomUUID();
+        Instant requestedAt = Instant.now();
         try {
             jdbc.update("""
                     INSERT INTO agent_upgrades(
@@ -60,20 +61,27 @@ public class AgentUpgradeService {
                         from_version, from_build_id, from_git_commit, from_artifact_sha256,
                         source_type, source_ref, source_commit,
                         target_version, target_build_id, target_git_commit, target_os, target_arch,
-                        artifact_name, artifact_url, artifact_sha256, status)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'REQUESTED')
+                        artifact_name, artifact_url, artifact_sha256, status, requested_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'REQUESTED',?)
                     """,
                     upgradeId, agentId,
                     agent.version(), agent.buildId(), agent.gitCommit(), agent.artifactSha256(),
                     target.sourceType().name(), target.sourceRef(), target.sourceCommit(),
                     target.version(), target.buildId(), target.gitCommit(), target.os(), target.arch(),
-                    target.artifactName(), target.artifactUrl(), target.artifactSha256());
+                    target.artifactName(), target.artifactUrl(), target.artifactSha256(), Timestamp.from(requestedAt));
         } catch (DuplicateKeyException e) {
             throw new UpgradeRequestException("agent already has an active upgrade", e);
         }
 
         auditRequested(upgradeId, agent, target);
-        return get(upgradeId);
+        return new AgentUpgrade(
+                upgradeId, agentId,
+                agent.version(), agent.buildId(), agent.gitCommit(), agent.artifactSha256(),
+                target.sourceType(), target.sourceRef(), target.sourceCommit(),
+                target.version(), target.buildId(), target.gitCommit(), target.os(), target.arch(),
+                target.artifactName(), target.artifactUrl(), target.artifactSha256(),
+                AgentUpgradeStatus.REQUESTED, requestedAt,
+                null, null, null, null, null, null, null, null, null);
     }
 
     public AgentUpgrade get(UUID upgradeId) {
