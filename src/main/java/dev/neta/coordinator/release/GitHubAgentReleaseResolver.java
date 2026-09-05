@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -29,6 +30,7 @@ public class GitHubAgentReleaseResolver {
     private final JdbcTemplate jdbc;
     private final Fetcher fetcher;
 
+    @Autowired
     public GitHubAgentReleaseResolver(ObjectMapper mapper, AgentReleaseProperties properties, JdbcTemplate jdbc) {
         this(mapper, properties, jdbc, new HttpFetcher(properties));
     }
