@@ -40,23 +40,18 @@ public class AgentAdminController {
     @GetMapping(value = "/agents", produces = MediaType.TEXT_PLAIN_VALUE)
     public String agents() {
         Instant now = Instant.now();
-        List<AgentRow> rows = jdbc.query("""
-                SELECT agent_id, display_name, status, enrolled_at, last_seen_at, last_sequence,
-                       certificate_sha256
-                FROM agents
-                ORDER BY COALESCE(NULLIF(display_name,''), agent_id)
-                """, (rs, n) -> new AgentRow(
-                rs.getString("agent_id"), rs.getString("display_name"), rs.getString("status"),
-                toInstant(rs.getTimestamp("enrolled_at")), toInstant(rs.getTimestamp("last_seen_at")),
-                rs.getLong("last_sequence"), rs.getString("certificate_sha256")));
+        List<AgentRow> rows = jdbc.query(agentSelect() + " ORDER BY COALESCE(NULLIF(display_name,''), agent_id)",
+                (rs, n) -> mapAgent(rs));
 
         StringBuilder out = new StringBuilder();
-        out.append(String.format("%-24s %-10s %-12s %-12s %s%n", "AGENT", "STATE", "LAST SEEN", "SEQUENCE", "AGENT ID"));
-        out.append("------------------------------------------------------------------------------------------\n");
+        out.append(String.format("%-24s %-10s %-12s %-16s %-18s %-12s %s%n",
+                "AGENT", "STATE", "VERSION", "BUILD", "PLATFORM", "LAST SEEN", "AGENT ID"));
+        out.append("----------------------------------------------------------------------------------------------------------------------\n");
         for (AgentRow row : rows) {
-            out.append(String.format("%-24s %-10s %-12s %-12d %s%n",
+            out.append(String.format("%-24s %-10s %-12s %-16s %-18s %-12s %s%n",
                     trim(displayOrId(row.displayName(), row.agentId()), 24), row.status(),
-                    relativeAge(row.lastSeenAt(), now), row.lastSequence(), row.agentId()));
+                    trim(value(row.agentVersion()), 12), trim(value(row.agentBuildId()), 16),
+                    trim(platform(row), 18), relativeAge(row.lastSeenAt(), now), row.agentId()));
         }
         return out.toString();
     }
@@ -71,6 +66,15 @@ public class AgentAdminController {
         line(out, "Enrolled", instant(row.enrolledAt()));
         line(out, "Last seen", instant(row.lastSeenAt()));
         line(out, "Last sequence", Long.toString(row.lastSequence()));
+        line(out, "Version", row.agentVersion());
+        line(out, "Build ID", row.agentBuildId());
+        line(out, "Git commit", row.agentGitCommit());
+        line(out, "Platform", platform(row));
+        line(out, "Artifact SHA-256", row.agentArtifactSha256());
+        line(out, "Protocol version", integer(row.agentProtocolVersion()));
+        line(out, "Schema version", integer(row.agentSchemaVersion()));
+        line(out, "Features", features(row.agentFeatures()));
+        line(out, "Build reported", instant(row.buildReportedAt()));
         line(out, "Certificate SHA-256", row.certificateSha256());
         out.append("\nRecent administration\n");
         out.append("---------------------------------\n");
@@ -128,19 +132,36 @@ public class AgentAdminController {
     }
 
     private AgentRow resolveAgent(String agent) {
-        List<AgentRow> rows = jdbc.query("""
-                SELECT agent_id, display_name, status, enrolled_at, last_seen_at, last_sequence,
-                       certificate_sha256
-                FROM agents
+        List<AgentRow> rows = jdbc.query(agentSelect() + """
                 WHERE agent_id=? OR display_name=?
                 ORDER BY CASE WHEN agent_id=? THEN 0 ELSE 1 END
                 LIMIT 1
-                """, (rs, n) -> new AgentRow(
-                rs.getString("agent_id"), rs.getString("display_name"), rs.getString("status"),
-                toInstant(rs.getTimestamp("enrolled_at")), toInstant(rs.getTimestamp("last_seen_at")),
-                rs.getLong("last_sequence"), rs.getString("certificate_sha256")), agent, agent, agent);
+                """, (rs, n) -> mapAgent(rs), agent, agent, agent);
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "agent not found");
         return rows.getFirst();
+    }
+
+    private static String agentSelect() {
+        return """
+                SELECT agent_id, display_name, status, enrolled_at, last_seen_at, last_sequence,
+                       certificate_sha256, agent_version, agent_build_id, agent_git_commit,
+                       agent_os, agent_arch, agent_artifact_sha256, agent_protocol_version,
+                       agent_schema_version, agent_features::text AS agent_features, build_reported_at
+                FROM agents
+                """;
+    }
+
+    private static AgentRow mapAgent(java.sql.ResultSet rs) throws java.sql.SQLException {
+        Integer protocolVersion = (Integer) rs.getObject("agent_protocol_version");
+        Integer schemaVersion = (Integer) rs.getObject("agent_schema_version");
+        return new AgentRow(
+                rs.getString("agent_id"), rs.getString("display_name"), rs.getString("status"),
+                toInstant(rs.getTimestamp("enrolled_at")), toInstant(rs.getTimestamp("last_seen_at")),
+                rs.getLong("last_sequence"), rs.getString("certificate_sha256"),
+                rs.getString("agent_version"), rs.getString("agent_build_id"), rs.getString("agent_git_commit"),
+                rs.getString("agent_os"), rs.getString("agent_arch"), rs.getString("agent_artifact_sha256"),
+                protocolVersion, schemaVersion, rs.getString("agent_features"),
+                toInstant(rs.getTimestamp("build_reported_at")));
     }
 
     private void requireAdmin(String suppliedToken) {
@@ -182,7 +203,31 @@ public class AgentAdminController {
     private static String instant(Instant value) { return value == null ? "-" : value.toString(); }
     private static String displayOrId(String name, String id) { return name == null || name.isBlank() ? id : name; }
     private static String trim(String value, int width) { return value.length() <= width ? value : value.substring(0, width - 1) + "…"; }
-    private static void line(StringBuilder out, String label, String value) { out.append(String.format("%-20s %s%n", label + ":", value == null || value.isBlank() ? "-" : value)); }
+    private static String value(String value) { return value == null || value.isBlank() ? "-" : value; }
+    private static String integer(Integer value) { return value == null ? "-" : value.toString(); }
+    private static String platform(AgentRow row) {
+        String os = value(row.agentOs());
+        String arch = value(row.agentArch());
+        if ("-".equals(os)) return "-";
+        return "-".equals(arch) ? os : os + "/" + arch;
+    }
+    private String features(String raw) {
+        if (raw == null || raw.isBlank()) return "-";
+        try {
+            var node = mapper.readTree(raw);
+            if (!node.isArray() || node.isEmpty()) return "-";
+            StringBuilder out = new StringBuilder();
+            for (var item : node) {
+                if (!item.isTextual()) continue;
+                if (!out.isEmpty()) out.append(", ");
+                out.append(item.asText());
+            }
+            return out.isEmpty() ? "-" : out.toString();
+        } catch (Exception ignored) {
+            return "-";
+        }
+    }
+    private static void line(StringBuilder out, String label, String value) { out.append(String.format("%-20s %s%n", label + ":", value(value))); }
 
     private static String relativeAge(Instant then, Instant now) {
         if (then == null) return "never";
@@ -196,6 +241,10 @@ public class AgentAdminController {
     }
 
     private record AgentRow(String agentId, String displayName, String status, Instant enrolledAt,
-                            Instant lastSeenAt, long lastSequence, String certificateSha256) {}
+                            Instant lastSeenAt, long lastSequence, String certificateSha256,
+                            String agentVersion, String agentBuildId, String agentGitCommit,
+                            String agentOs, String agentArch, String agentArtifactSha256,
+                            Integer agentProtocolVersion, Integer agentSchemaVersion,
+                            String agentFeatures, Instant buildReportedAt) {}
     private record AuditRow(String eventType, String details, Instant createdAt) {}
 }
