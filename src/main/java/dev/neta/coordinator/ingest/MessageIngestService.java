@@ -14,6 +14,7 @@ import dev.neta.coordinator.protocol.ProtocolException;
 import dev.neta.coordinator.security.PeerCertificateService.PeerCertificate;
 import dev.neta.coordinator.upgrade.AgentUpgradeDeliveryService;
 import dev.neta.coordinator.upgrade.AgentUpgradeInstruction;
+import dev.neta.coordinator.upgrade.AgentUpgradeLifecycleService;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Map;
@@ -30,16 +31,19 @@ public class MessageIngestService {
     private final CoordinatorProperties properties;
     private final CoordinatorStorageProperties storage;
     private final AgentUpgradeDeliveryService upgradeDelivery;
+    private final AgentUpgradeLifecycleService upgradeLifecycle;
 
     public MessageIngestService(JdbcTemplate jdbc, ObjectMapper mapper, EnvelopeValidator validator,
                                 CoordinatorProperties properties, CoordinatorStorageProperties storage,
-                                AgentUpgradeDeliveryService upgradeDelivery) {
+                                AgentUpgradeDeliveryService upgradeDelivery,
+                                AgentUpgradeLifecycleService upgradeLifecycle) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.validator = validator;
         this.properties = properties;
         this.storage = storage;
         this.upgradeDelivery = upgradeDelivery;
+        this.upgradeLifecycle = upgradeLifecycle;
     }
 
     @Transactional
@@ -91,8 +95,14 @@ public class MessageIngestService {
         final boolean heartbeat = envelope.messageType() == MessageType.HEARTBEAT;
         if (!heartbeat || storage.retainHeartbeats()) persistProtocolMessage(envelope);
         persistTypedPayload(envelope);
+        if (envelope.messageType() == MessageType.UPGRADE_PROGRESS) {
+            upgradeLifecycle.ingestProgress(envelope.agentId(), envelope.payload());
+        }
         persistContact(envelope);
         persistBuildIdentity(envelope.agentId(), buildIdentity);
+        if (buildIdentity != null && (heartbeat || envelope.messageType() == MessageType.AGENT_HELLO)) {
+            upgradeLifecycle.reconcileReportedBuild(envelope.agentId(), buildIdentity);
+        }
         if (heartbeat) {
             jdbc.update("UPDATE agents SET last_sequence=?, last_seen_at=now(), last_heartbeat_payload=CAST(? AS jsonb) WHERE agent_id=?",
                     envelope.sequence(), json(envelope.payload()), envelope.agentId());
