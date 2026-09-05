@@ -18,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -97,7 +98,7 @@ class AgentUpgradeLifecycleServiceTest {
         service.reconcileReportedBuild("AGENT-1", exact);
 
         verify(jdbc).update(contains("status='CONFIRMED'"), any(Object[].class));
-        verify(jdbc).update(contains("AGENT_UPGRADE_CONFIRMED"), any(Object[].class));
+        verify(jdbc).update(contains("INSERT INTO audit_events"), eq("AGENT_UPGRADE_CONFIRMED"), eq("AGENT-1"), anyString());
     }
 
     @Test
@@ -118,7 +119,7 @@ class AgentUpgradeLifecycleServiceTest {
         service.reconcileReportedBuild("AGENT-1", previous);
 
         verify(jdbc).update(contains("status='ROLLED_BACK'"), any(Object[].class));
-        verify(jdbc).update(contains("AGENT_UPGRADE_ROLLED_BACK"), any(Object[].class));
+        verify(jdbc).update(contains("INSERT INTO audit_events"), eq("AGENT_UPGRADE_ROLLED_BACK"), eq("AGENT-1"), anyString());
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
