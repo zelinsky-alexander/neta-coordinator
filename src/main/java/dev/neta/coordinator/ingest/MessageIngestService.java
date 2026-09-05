@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.neta.coordinator.config.CoordinatorProperties;
 import dev.neta.coordinator.config.CoordinatorStorageProperties;
+import dev.neta.coordinator.protocol.AgentBuildIdentity;
 import dev.neta.coordinator.protocol.EnvelopeValidator;
 import dev.neta.coordinator.protocol.MessageEnvelope;
 import dev.neta.coordinator.protocol.MessageType;
@@ -80,10 +81,12 @@ public class MessageIngestService {
         if (envelope.sequence() <= agent.lastSequence())
             throw ProtocolException.conflict("sequence is not newer than the last accepted message");
 
+        AgentBuildIdentity buildIdentity = AgentBuildIdentity.from(envelope).orElse(null);
         final boolean heartbeat = envelope.messageType() == MessageType.HEARTBEAT;
         if (!heartbeat || storage.retainHeartbeats()) persistProtocolMessage(envelope);
         persistTypedPayload(envelope);
         persistContact(envelope);
+        persistBuildIdentity(envelope.agentId(), buildIdentity);
         if (heartbeat) {
             jdbc.update("UPDATE agents SET last_sequence=?, last_seen_at=now(), last_heartbeat_payload=CAST(? AS jsonb) WHERE agent_id=?",
                     envelope.sequence(), json(envelope.payload()), envelope.agentId());
@@ -95,6 +98,18 @@ public class MessageIngestService {
                     envelope.agentId(), envelope.messageId(), json(Map.of("message_type", envelope.messageType().wireName())));
         }
         return new IngestResult(envelope.messageId(), "ACCEPTED", Instant.now());
+    }
+
+    private void persistBuildIdentity(String agentId, AgentBuildIdentity build) {
+        if (build == null) return;
+        jdbc.update("""
+                UPDATE agents
+                SET agent_version=?, agent_build_id=?, agent_git_commit=?, agent_os=?, agent_arch=?,
+                    agent_artifact_sha256=?, agent_protocol_version=?, agent_schema_version=?,
+                    agent_features=CAST(? AS jsonb), build_reported_at=now()
+                WHERE agent_id=?
+                """, build.version(), build.buildId(), build.gitCommit(), build.os(), build.arch(),
+                build.artifactSha256(), build.protocolVersion(), build.schemaVersion(), json(build.features()), agentId);
     }
 
     private void persistContact(MessageEnvelope envelope) {
