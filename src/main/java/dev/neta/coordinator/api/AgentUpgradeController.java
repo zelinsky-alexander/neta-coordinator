@@ -1,13 +1,21 @@
 package dev.neta.coordinator.api;
 
+import dev.neta.coordinator.release.GitHubAgentReleaseResolver.ResolutionException;
+import dev.neta.coordinator.release.ReleaseSourceType;
 import dev.neta.coordinator.upgrade.AgentUpgrade;
+import dev.neta.coordinator.upgrade.AgentUpgradeRequestService;
 import dev.neta.coordinator.upgrade.AgentUpgradeService;
 import dev.neta.coordinator.upgrade.AgentUpgradeService.UpgradeRequestException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -16,10 +24,40 @@ import org.springframework.web.server.ResponseStatusException;
 @RestController
 @RequestMapping("/api/v1/operator")
 public class AgentUpgradeController {
-    private final AgentUpgradeService upgrades;
+    private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
 
-    public AgentUpgradeController(AgentUpgradeService upgrades) {
+    private final AgentUpgradeService upgrades;
+    private final AgentUpgradeRequestService requests;
+    private final String adminToken;
+
+    public AgentUpgradeController(AgentUpgradeService upgrades,
+                                  AgentUpgradeRequestService requests,
+                                  @Value("${NETA_OPERATOR_ADMIN_TOKEN:}") String adminToken) {
         this.upgrades = upgrades;
+        this.requests = requests;
+        this.adminToken = adminToken == null ? "" : adminToken;
+    }
+
+    @PostMapping(value = "/agent-upgrade", produces = MediaType.TEXT_PLAIN_VALUE)
+    public String requestUpgrade(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                                 @RequestParam("agent") String agent,
+                                 @RequestParam(defaultValue = "release") String source,
+                                 @RequestParam("ref") String ref,
+                                 @RequestParam(defaultValue = "false") boolean allowDevelopment) {
+        requireAdmin(suppliedToken);
+        try {
+            ReleaseSourceType sourceType = ReleaseSourceType.parse(source);
+            AgentUpgrade upgrade = requests.request(agent, sourceType, ref, allowDevelopment);
+            return requested(upgrade);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        } catch (UpgradeRequestException e) {
+            HttpStatus status = e.getMessage() != null && e.getMessage().startsWith("agent not found")
+                    ? HttpStatus.NOT_FOUND : HttpStatus.CONFLICT;
+            throw new ResponseStatusException(status, e.getMessage(), e);
+        } catch (ResolutionException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, e.getMessage(), e);
+        }
     }
 
     @GetMapping(value = "/upgrades", produces = MediaType.TEXT_PLAIN_VALUE)
@@ -50,6 +88,34 @@ public class AgentUpgradeController {
         } catch (UpgradeRequestException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e);
         }
+    }
+
+    private void requireAdmin(String suppliedToken) {
+        if (adminToken.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "agent upgrade administration is disabled; configure NETA_OPERATOR_ADMIN_TOKEN");
+        }
+        byte[] expected = adminToken.getBytes(StandardCharsets.UTF_8);
+        byte[] supplied = (suppliedToken == null ? "" : suppliedToken).getBytes(StandardCharsets.UTF_8);
+        if (!MessageDigest.isEqual(expected, supplied)) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid operator admin token");
+        }
+    }
+
+    private static String requested(AgentUpgrade row) {
+        StringBuilder out = new StringBuilder();
+        out.append("Upgrade requested\n\n");
+        line(out, "Upgrade ID", row.upgradeId().toString());
+        line(out, "Agent", row.agentId());
+        line(out, "Current", build(row.fromVersion(), row.fromBuildId()));
+        line(out, "Target", build(row.targetVersion(), row.targetBuildId()));
+        line(out, "Platform", row.targetOs() + "/" + row.targetArch());
+        line(out, "Source", row.sourceType().name().toLowerCase().replace('_', '-') + " " + row.sourceRef());
+        line(out, "Commit", row.targetGitCommit());
+        line(out, "Artifact", row.artifactName());
+        line(out, "SHA-256", row.artifactSha256());
+        line(out, "State", row.status().name());
+        return out.toString();
     }
 
     private static String detail(AgentUpgrade row) {
