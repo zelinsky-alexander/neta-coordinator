@@ -152,16 +152,14 @@ public class AgentAdminController {
     }
 
     private static AgentRow mapAgent(java.sql.ResultSet rs) throws java.sql.SQLException {
-        Integer protocolVersion = (Integer) rs.getObject("agent_protocol_version");
-        Integer schemaVersion = (Integer) rs.getObject("agent_schema_version");
         return new AgentRow(
                 rs.getString("agent_id"), rs.getString("display_name"), rs.getString("status"),
                 toInstant(rs.getTimestamp("enrolled_at")), toInstant(rs.getTimestamp("last_seen_at")),
                 rs.getLong("last_sequence"), rs.getString("certificate_sha256"),
                 rs.getString("agent_version"), rs.getString("agent_build_id"), rs.getString("agent_git_commit"),
                 rs.getString("agent_os"), rs.getString("agent_arch"), rs.getString("agent_artifact_sha256"),
-                protocolVersion, schemaVersion, rs.getString("agent_features"),
-                toInstant(rs.getTimestamp("build_reported_at")));
+                rs.getObject("agent_protocol_version", Integer.class), rs.getObject("agent_schema_version", Integer.class),
+                rs.getString("agent_features"), toInstant(rs.getTimestamp("build_reported_at")));
     }
 
     private void requireAdmin(String suppliedToken) {
