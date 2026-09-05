@@ -81,8 +81,8 @@ public class OperatorViewController {
                 timestampToInstant(rs.getTimestamp("enrolled_at")), timestampToInstant(rs.getTimestamp("last_seen_at")),
                 rs.getString("last_heartbeat_payload"), rs.getString("agent_version"), rs.getString("agent_build_id"),
                 rs.getString("agent_git_commit"), rs.getString("agent_os"), rs.getString("agent_arch"),
-                rs.getString("agent_artifact_sha256"), (Integer) rs.getObject("agent_protocol_version"),
-                (Integer) rs.getObject("agent_schema_version"), rs.getString("agent_features"),
+                rs.getString("agent_artifact_sha256"), rs.getObject("agent_protocol_version", Integer.class),
+                rs.getObject("agent_schema_version", Integer.class), rs.getString("agent_features"),
                 timestampToInstant(rs.getTimestamp("build_reported_at"))), agentId, agentId, agentId);
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "endpoint not found");
 
