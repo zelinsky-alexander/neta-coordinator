@@ -37,22 +37,27 @@ public class OperatorViewController {
     public String endpoints() {
         Instant now = Instant.now();
         List<EndpointRow> rows = jdbc.query("""
-                SELECT agent_id, display_name, status, last_seen_at, last_heartbeat_payload::text
+                SELECT agent_id, display_name, status, last_seen_at, last_heartbeat_payload::text,
+                       agent_version, agent_build_id, agent_os, agent_arch
                 FROM agents
                 ORDER BY COALESCE(NULLIF(display_name, ''), agent_id)
                 """, (rs, rowNum) -> new EndpointRow(
                 rs.getString("agent_id"), rs.getString("display_name"), rs.getString("status"),
-                timestampToInstant(rs.getTimestamp("last_seen_at")), rs.getString("last_heartbeat_payload")));
+                timestampToInstant(rs.getTimestamp("last_seen_at")), rs.getString("last_heartbeat_payload"),
+                rs.getString("agent_version"), rs.getString("agent_build_id"),
+                rs.getString("agent_os"), rs.getString("agent_arch")));
 
         StringBuilder out = new StringBuilder();
-        out.append(String.format("%-24s %-18s %-18s %-12s %s%n", "AGENT", "PLATFORM", "SITE", "STATUS", "LAST SEEN"));
-        out.append("--------------------------------------------------------------------------------------------\n");
+        out.append(String.format("%-24s %-12s %-16s %-18s %-18s %-12s %s%n",
+                "AGENT", "VERSION", "BUILD", "PLATFORM", "SITE", "STATUS", "LAST SEEN"));
+        out.append("------------------------------------------------------------------------------------------------------------------------\n");
         for (EndpointRow row : rows) {
             JsonNode heartbeat = parseJson(row.heartbeatPayload());
             String site = firstText(heartbeat, "site", "region", "location");
             if ("-".equals(site)) site = nestedText(heartbeat, "network", "site");
-            out.append(String.format("%-24s %-18s %-18s %-12s %s%n",
-                    trim(agentName(row), 24), trim(platform(heartbeat), 18), trim(site, 18),
+            out.append(String.format("%-24s %-12s %-16s %-18s %-18s %-12s %s%n",
+                    trim(agentName(row), 24), trim(valueRaw(row.agentVersion()), 12),
+                    trim(valueRaw(row.agentBuildId()), 16), trim(platform(row, heartbeat), 18), trim(site, 18),
                     endpointStatus(row, now), relativeAge(row.lastSeenAt(), now)));
         }
         return out.toString();
@@ -62,7 +67,10 @@ public class OperatorViewController {
     public String endpoint(@PathVariable String agentId) {
         List<EndpointDetail> rows = jdbc.query("""
                 SELECT agent_id, fleet_id, display_name, certificate_sha256, status, last_sequence,
-                       enrolled_at, last_seen_at, last_heartbeat_payload::text
+                       enrolled_at, last_seen_at, last_heartbeat_payload::text,
+                       agent_version, agent_build_id, agent_git_commit, agent_os, agent_arch,
+                       agent_artifact_sha256, agent_protocol_version, agent_schema_version,
+                       agent_features::text AS agent_features, build_reported_at
                 FROM agents
                 WHERE agent_id=? OR display_name=?
                 ORDER BY CASE WHEN agent_id=? THEN 0 ELSE 1 END
@@ -71,7 +79,11 @@ public class OperatorViewController {
                 rs.getString("agent_id"), rs.getString("fleet_id"), rs.getString("display_name"),
                 rs.getString("certificate_sha256"), rs.getString("status"), rs.getLong("last_sequence"),
                 timestampToInstant(rs.getTimestamp("enrolled_at")), timestampToInstant(rs.getTimestamp("last_seen_at")),
-                rs.getString("last_heartbeat_payload")), agentId, agentId, agentId);
+                rs.getString("last_heartbeat_payload"), rs.getString("agent_version"), rs.getString("agent_build_id"),
+                rs.getString("agent_git_commit"), rs.getString("agent_os"), rs.getString("agent_arch"),
+                rs.getString("agent_artifact_sha256"), (Integer) rs.getObject("agent_protocol_version"),
+                (Integer) rs.getObject("agent_schema_version"), rs.getString("agent_features"),
+                timestampToInstant(rs.getTimestamp("build_reported_at"))), agentId, agentId, agentId);
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "endpoint not found");
 
         EndpointDetail row = rows.getFirst();
@@ -79,14 +91,24 @@ public class OperatorViewController {
         JsonNode heartbeat = parseJson(row.heartbeatPayload());
         String site = firstText(heartbeat, "site", "region", "location");
         if ("-".equals(site)) site = nestedText(heartbeat, "network", "site");
+        EndpointRow statusRow = new EndpointRow(row.agentId(), row.displayName(), row.enrollmentStatus(), row.lastSeenAt(),
+                row.heartbeatPayload(), row.agentVersion(), row.agentBuildId(), row.agentOs(), row.agentArch());
 
         StringBuilder out = new StringBuilder();
         line(out, "Agent", displayOrId(row.displayName(), row.agentId()));
         line(out, "Agent ID", row.agentId());
         line(out, "Fleet", row.fleetId());
-        line(out, "Platform", platform(heartbeat));
+        line(out, "Version", row.agentVersion());
+        line(out, "Build ID", row.agentBuildId());
+        line(out, "Git commit", row.agentGitCommit());
+        line(out, "Platform", platform(statusRow, heartbeat));
+        line(out, "Artifact SHA-256", row.agentArtifactSha256());
+        line(out, "Protocol version", integer(row.agentProtocolVersion()));
+        line(out, "Schema version", integer(row.agentSchemaVersion()));
+        line(out, "Features", features(row.agentFeatures()));
+        line(out, "Build reported", instant(row.buildReportedAt()));
         line(out, "Site", site);
-        line(out, "Status", endpointStatus(new EndpointRow(row.agentId(), row.displayName(), row.enrollmentStatus(), row.lastSeenAt(), row.heartbeatPayload()), now));
+        line(out, "Status", endpointStatus(statusRow, now));
         line(out, "Enrollment", value(row.enrollmentStatus()));
         line(out, "Last seen", row.lastSeenAt() == null ? "never" : relativeAge(row.lastSeenAt(), now) + " (" + row.lastSeenAt() + ")");
         line(out, "Online threshold", liveness.onlineThreshold().toString());
@@ -201,12 +223,30 @@ public class OperatorViewController {
         catch (Exception ignored) { return node.toString(); }
     }
 
-    private static String platform(JsonNode heartbeat) {
+    private static String platform(EndpointRow row, JsonNode heartbeat) {
+        if (row.agentOs() != null && !row.agentOs().isBlank()) {
+            return row.agentArch() == null || row.agentArch().isBlank() ? row.agentOs() : row.agentOs() + "/" + row.agentArch();
+        }
         String direct = firstText(heartbeat, "platform", "os");
         String arch = firstText(heartbeat, "arch", "architecture");
         if (!"-".equals(direct) && !"-".equals(arch) && !direct.contains("/")) return direct + "/" + arch;
         return direct;
     }
+
+    private String features(String raw) {
+        if (raw == null || raw.isBlank()) return "-";
+        JsonNode node = parseJson(raw);
+        if (!node.isArray() || node.isEmpty()) return "-";
+        StringBuilder out = new StringBuilder();
+        for (JsonNode item : node) {
+            if (!item.isTextual()) continue;
+            if (!out.isEmpty()) out.append(", ");
+            out.append(item.asText());
+        }
+        return out.isEmpty() ? "-" : out.toString();
+    }
+
+    private static String integer(Integer value) { return value == null ? "-" : value.toString(); }
 
     private static String firstText(JsonNode node, String... fields) {
         for (String field : fields) {
@@ -254,10 +294,15 @@ public class OperatorViewController {
 
     private static Instant timestampToInstant(Timestamp ts) { return ts == null ? null : ts.toInstant(); }
 
-    private record EndpointRow(String agentId, String displayName, String enrollmentStatus, Instant lastSeenAt, String heartbeatPayload) {}
+    private record EndpointRow(String agentId, String displayName, String enrollmentStatus, Instant lastSeenAt,
+                               String heartbeatPayload, String agentVersion, String agentBuildId,
+                               String agentOs, String agentArch) {}
     private record EndpointDetail(String agentId, String fleetId, String displayName, String certificateSha256,
                                   String enrollmentStatus, long lastSequence, Instant enrolledAt, Instant lastSeenAt,
-                                  String heartbeatPayload) {}
+                                  String heartbeatPayload, String agentVersion, String agentBuildId, String agentGitCommit,
+                                  String agentOs, String agentArch, String agentArtifactSha256,
+                                  Integer agentProtocolVersion, Integer agentSchemaVersion,
+                                  String agentFeatures, Instant buildReportedAt) {}
     private record FindingRow(String findingId, String agentId, String displayName, String targetHost, int targetPort,
                               String trustVerdict, String performanceVerdict, long occurrenceCount, String status, Instant lastSeen) {}
     private record FindingDetail(String findingId, String findingKey, String messageId, String agentId, String displayName,
