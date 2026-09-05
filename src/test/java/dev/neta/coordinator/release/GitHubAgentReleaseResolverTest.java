@@ -10,10 +10,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class GitHubAgentReleaseResolverTest {
     private static final String COMMIT = "1".repeat(40);
@@ -87,9 +84,7 @@ class GitHubAgentReleaseResolverTest {
     }
 
     private GitHubAgentReleaseResolver resolver(FakeFetcher fetcher) {
-        JdbcTemplate jdbc = mock(JdbcTemplate.class);
-        when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
-        return new GitHubAgentReleaseResolver(mapper, properties, jdbc, fetcher);
+        return new GitHubAgentReleaseResolver(mapper, properties, mock(JdbcTemplate.class), fetcher);
     }
 
     private static String releaseJson(String tag, boolean prerelease, String commit) {
