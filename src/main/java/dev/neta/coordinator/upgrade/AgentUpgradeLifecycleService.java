@@ -127,9 +127,9 @@ public class AgentUpgradeLifecycleService {
             return current == AgentUpgradeStatus.DELIVERED || current == AgentUpgradeStatus.DOWNLOADING ||
                     current == AgentUpgradeStatus.INSTALLING || current == AgentUpgradeStatus.LOCAL_HEALTHY;
         }
-        return (current == AgentUpgradeStatus.DELIVERED && next == AgentUpgradeStatus.DOWNLOADING) ||
-                (current == AgentUpgradeStatus.DOWNLOADING && next == AgentUpgradeStatus.INSTALLING) ||
-                (current == AgentUpgradeStatus.INSTALLING && next == AgentUpgradeStatus.LOCAL_HEALTHY);
+        int currentRank = rank(current);
+        int nextRank = rank(next);
+        return currentRank >= 0 && nextRank >= 0 && nextRank > currentRank;
     }
 
     private static boolean isSurpassedNonterminal(AgentUpgradeStatus current, AgentUpgradeStatus reported) {
