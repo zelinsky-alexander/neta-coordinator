@@ -70,11 +70,12 @@ class AgentUpgradeLifecycleServiceTest {
     }
 
     @Test
-    void rejectsForwardSkipAndForeignAgent() {
+    void acceptsForwardSkipForResumedWorkerAndStillRejectsForeignAgent() {
         var localHealthy = JsonNodeFactory.instance.objectNode()
                 .put("upgrade_id", UPGRADE_ID.toString())
                 .put("status", "LOCAL_HEALTHY");
-        assertThrows(ProtocolException.class, () -> service.ingestProgress("AGENT-1", localHealthy));
+        assertDoesNotThrow(() -> service.ingestProgress("AGENT-1", localHealthy));
+        verify(jdbc).update(contains("local_healthy_at"), any(Object[].class));
 
         var downloading = JsonNodeFactory.instance.objectNode()
                 .put("upgrade_id", UPGRADE_ID.toString())
