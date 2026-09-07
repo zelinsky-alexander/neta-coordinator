@@ -110,17 +110,20 @@ public class FindingInvestigationController {
         out.append("Findings matched: ").append(matched == null ? 0 : matched)
                 .append("  showing: ").append(rows.size())
                 .append("  offset: ").append(boundedOffset).append("\n\n");
-        out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-15s %5s %-8s %-20s %s%n",
-                "LAST SEEN","AGENT","TARGET","TYPE","SEVERITY","TRUST CONTEXT","COUNT","STATUS","INCIDENT","FINDING"));
-        out.append("-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
+        out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5s %-8s %s%n",
+                "LAST SEEN","AGENT","TARGET","TYPE","SEVERITY","CONFIDENCE","ASSESSMENT","COUNT","STATUS","INCIDENT"));
+        out.append("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
         Instant now = Instant.now();
         for (Row r : rows) {
             String findingType = findingAttribute(r.changes(), "Finding type:", fallbackFindingType(r.findingId()));
             String severity = findingAttribute(r.changes(), "Severity:", "-");
-            out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-15s %5d %-8s %-20s %s%n",
+            String confidence = formatConfidence(findingAttribute(r.changes(), "Confidence:", "-"));
+            String intent = findingAttribute(r.changes(), "Malicious intent:", "UNKNOWN");
+            String assessment = assessment(findingType, r.trust(), intent);
+            out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5d %-8s %s%n",
                     age(r.lastSeen(), now), trim(display(r.displayName(), r.agentId()),20),
-                    trim(r.host()+":"+r.port(),27), trim(value(findingType),28), value(severity), trustContext(r.trust()),
-                    r.count(), value(r.status()), r.incidentId()==null?"-":r.incidentId(), r.findingId()));
+                    trim(r.host()+":"+r.port(),27), trim(value(findingType),28), value(severity), confidence,
+                    trim(assessment,20), r.count(), value(r.status()), r.incidentId()==null?"-":r.incidentId()));
         }
         return out.toString();
     }
@@ -225,9 +228,20 @@ public class FindingInvestigationController {
         return "CONNECTION_ASSURANCE";
     }
 
-    private static String trustContext(String trust) {
-        String normalized = value(trust);
-        return "UNVERIFIED".equals(normalized) ? "NOT_VERIFIED" : normalized;
+    private static String formatConfidence(String confidence) {
+        if (!text(confidence) || "-".equals(confidence)) return "-";
+        try { return String.format(Locale.ROOT, "%.2f", Double.parseDouble(confidence)); }
+        catch (NumberFormatException ignored) { return confidence; }
+    }
+
+    private static String assessment(String findingType, String trust, String maliciousIntent) {
+        String type = value(findingType);
+        if ("CONNECTION_ASSURANCE".equals(type)) {
+            String peer = value(trust);
+            return "-".equals(peer) ? "PEER_UNKNOWN" : "PEER_" + peer;
+        }
+        String intent = value(maliciousIntent);
+        return "INTENT_" + ("-".equals(intent) ? "UNKNOWN" : intent);
     }
 
     private String pretty(String json) {
