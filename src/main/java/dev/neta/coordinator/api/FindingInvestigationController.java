@@ -110,9 +110,9 @@ public class FindingInvestigationController {
         out.append("Findings matched: ").append(matched == null ? 0 : matched)
                 .append("  showing: ").append(rows.size())
                 .append("  offset: ").append(boundedOffset).append("\n\n");
-        out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5s %-8s %s%n",
-                "LAST SEEN","AGENT","TARGET","TYPE","SEVERITY","CONFIDENCE","ASSESSMENT","COUNT","STATUS","INCIDENT"));
-        out.append("--------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
+        out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5s %-8s %-20s %s%n",
+                "LAST SEEN","AGENT","TARGET","TYPE","SEVERITY","CONFIDENCE","ASSESSMENT","COUNT","STATUS","INCIDENT","FINDING"));
+        out.append("-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
         Instant now = Instant.now();
         for (Row r : rows) {
             String findingType = findingAttribute(r.changes(), "Finding type:", fallbackFindingType(r.findingId()));
@@ -120,10 +120,10 @@ public class FindingInvestigationController {
             String confidence = formatConfidence(findingAttribute(r.changes(), "Confidence:", "-"));
             String intent = findingAttribute(r.changes(), "Malicious intent:", "UNKNOWN");
             String assessment = assessment(findingType, r.trust(), intent);
-            out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5d %-8s %s%n",
+            out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5d %-8s %-20s %s%n",
                     age(r.lastSeen(), now), trim(display(r.displayName(), r.agentId()),20),
                     trim(r.host()+":"+r.port(),27), trim(value(findingType),28), value(severity), confidence,
-                    trim(assessment,20), r.count(), value(r.status()), r.incidentId()==null?"-":r.incidentId()));
+                    trim(assessment,20), r.count(), value(r.status()), r.incidentId()==null?"-":r.incidentId(), r.findingId()));
         }
         return out.toString();
     }
