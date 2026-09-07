@@ -209,10 +209,12 @@ public class PortalReadApiController {
     }
 
     private FindingItem findingItem(String id,String agentId,String displayName,String host,int port,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId,String changes) {
+        String type = findingAttribute(changes,"Finding type:",fallbackFindingType(id));
+        String severity = findingAttribute(changes,"Severity:","-");
+        String confidence = formatConfidence(findingAttribute(changes,"Confidence:","-"));
+        String intent = findingAttribute(changes,"Malicious intent:","UNKNOWN");
         return new FindingItem(id,agentId,display(displayName,agentId),host,port,
-                findingAttribute(changes,"Finding type:",fallbackFindingType(id)),
-                findingAttribute(changes,"Severity:","-"),
-                trustContext(trust),performance,count,status,firstSeen,lastSeen,incidentId);
+                type,severity,confidence,assessment(type,trust,intent),trust,performance,count,status,firstSeen,lastSeen,incidentId);
     }
 
     private String findingAttribute(String changes,String prefix,String fallback) {
@@ -235,7 +237,9 @@ public class PortalReadApiController {
     }
 
     private static String fallbackFindingType(String id){if(!text(id))return "-";if(id.startsWith("FINDING-BEHAVIOR-"))return "BEHAVIOR";if(id.startsWith("FINDING-TRANSFER-"))return "TRANSFER_BEHAVIOR";return "CONNECTION_ASSURANCE";}
-    private static String trustContext(String trust){if(!text(trust))return "-";String value=trust.toUpperCase(Locale.ROOT);return "UNVERIFIED".equals(value)?"NOT_VERIFIED":value;}
+    private static String formatConfidence(String confidence){if(!text(confidence)||"-".equals(confidence))return "-";try{return String.format(Locale.ROOT,"%.2f",Double.parseDouble(confidence));}catch(NumberFormatException ignored){return confidence;}}
+    private static String assessment(String findingType,String trust,String maliciousIntent){String type=upper(findingType);if("CONNECTION_ASSURANCE".equals(type)){String peer=upper(trust);return "-".equals(peer)?"PEER_UNKNOWN":"PEER_"+peer;}String intent=upper(maliciousIntent);return "INTENT_"+("-".equals(intent)?"UNKNOWN":intent);}
+    private static String upper(String value){return text(value)?value.toUpperCase(Locale.ROOT):"-";}
     private static List<Object> withState(List<Object> args,String state){if(text(state))args.add(args.size()-1,state);return args;}
     private static int bounded(int limit){return Math.max(1,Math.min(MAX_LIMIT,limit));}
     private static boolean text(String value){return value!=null&&!value.isBlank();}
@@ -253,7 +257,7 @@ public class PortalReadApiController {
     public record CertificateCounts(long valid,long expiring,long critical,long expired,long unknown){}
     public record FleetSummary(FleetAgents agents,FindingCounts findings,CertificateCounts certificates){}
     public record AgentItem(String id,String name,String state,Instant lastSeen,String version,String build,String gitCommit,String os,String arch,String artifactSha256,Integer protocolVersion,Integer schemaVersion,String features,String certificateSha256,Instant enrolledAt,long lastSequence){}
-    public record FindingItem(String id,String agentId,String agentName,String host,int port,String type,String severity,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId){}
+    public record FindingItem(String id,String agentId,String agentName,String host,int port,String type,String severity,String confidence,String assessment,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId){}
     public record CertificateItem(String agentId,String agentName,String agentStatus,String state,String fingerprint,Instant notBefore,Instant notAfter,Instant rotatedAt){}
     public record UpgradeItem(UUID id,String agentId,String fromVersion,String fromBuild,String targetVersion,String targetBuild,String status,String os,String arch,String sourceType,String sourceRef,Instant requestedAt,String failureCode,String failureMessage){}
 }
