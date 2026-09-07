@@ -1,5 +1,7 @@
 package dev.neta.coordinator.api;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -22,8 +24,12 @@ import org.springframework.web.server.ResponseStatusException;
 public class PortalReadApiController {
     private static final int MAX_LIMIT = 100;
     private final JdbcTemplate jdbc;
+    private final ObjectMapper mapper;
 
-    public PortalReadApiController(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+    public PortalReadApiController(JdbcTemplate jdbc, ObjectMapper mapper) {
+        this.jdbc = jdbc;
+        this.mapper = mapper;
+    }
 
     @GetMapping("/fleet/summary")
     public FleetSummary fleetSummary() {
@@ -129,13 +135,15 @@ public class PortalReadApiController {
         args.add(bounded + 1);
         List<FindingItem> rows = jdbc.query("""
                 SELECT f.finding_id,f.agent_id,a.display_name,f.target_host,f.target_port,f.trust_verdict,
-                       f.performance_verdict,f.occurrence_count,f.status,f.first_seen,f.last_seen,m.incident_id
+                       f.performance_verdict,f.occurrence_count,f.status,f.first_seen,f.last_seen,m.incident_id,
+                       f.changes::text AS changes
                 FROM findings f JOIN agents a ON a.agent_id=f.agent_id
                 LEFT JOIN incident_findings m ON m.finding_id=f.finding_id
                 """ + where + " ORDER BY f.last_seen DESC,f.finding_id DESC LIMIT ?",
-                (rs,n) -> new FindingItem(rs.getString("finding_id"), rs.getString("agent_id"), display(rs.getString("display_name"),rs.getString("agent_id")),
+                (rs,n) -> findingItem(rs.getString("finding_id"), rs.getString("agent_id"), rs.getString("display_name"),
                         rs.getString("target_host"), rs.getInt("target_port"), rs.getString("trust_verdict"), rs.getString("performance_verdict"),
-                        rs.getLong("occurrence_count"), rs.getString("status"), instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")), rs.getString("incident_id")),
+                        rs.getLong("occurrence_count"), rs.getString("status"), instant(rs.getTimestamp("first_seen")),
+                        instant(rs.getTimestamp("last_seen")), rs.getString("incident_id"), rs.getString("changes")),
                 args.toArray());
         return page(rows, bounded, r -> encode(r.lastSeen().toString(), r.id()));
     }
@@ -144,12 +152,14 @@ public class PortalReadApiController {
     public FindingItem finding(@PathVariable String findingId) {
         List<FindingItem> rows = jdbc.query("""
                 SELECT f.finding_id,f.agent_id,a.display_name,f.target_host,f.target_port,f.trust_verdict,
-                       f.performance_verdict,f.occurrence_count,f.status,f.first_seen,f.last_seen,m.incident_id
+                       f.performance_verdict,f.occurrence_count,f.status,f.first_seen,f.last_seen,m.incident_id,
+                       f.changes::text AS changes
                 FROM findings f JOIN agents a ON a.agent_id=f.agent_id
                 LEFT JOIN incident_findings m ON m.finding_id=f.finding_id WHERE f.finding_id=?
-                """, (rs,n) -> new FindingItem(rs.getString("finding_id"),rs.getString("agent_id"),display(rs.getString("display_name"),rs.getString("agent_id")),
+                """, (rs,n) -> findingItem(rs.getString("finding_id"),rs.getString("agent_id"),rs.getString("display_name"),
                         rs.getString("target_host"),rs.getInt("target_port"),rs.getString("trust_verdict"),rs.getString("performance_verdict"),
-                        rs.getLong("occurrence_count"),rs.getString("status"),instant(rs.getTimestamp("first_seen")),instant(rs.getTimestamp("last_seen")),rs.getString("incident_id")), findingId);
+                        rs.getLong("occurrence_count"),rs.getString("status"),instant(rs.getTimestamp("first_seen")),
+                        instant(rs.getTimestamp("last_seen")),rs.getString("incident_id"),rs.getString("changes")), findingId);
         if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"finding not found");
         return rows.getFirst();
     }
@@ -198,6 +208,34 @@ public class PortalReadApiController {
         return page(rows,bounded,r->encode(r.requestedAt().toString(),r.id().toString()));
     }
 
+    private FindingItem findingItem(String id,String agentId,String displayName,String host,int port,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId,String changes) {
+        return new FindingItem(id,agentId,display(displayName,agentId),host,port,
+                findingAttribute(changes,"Finding type:",fallbackFindingType(id)),
+                findingAttribute(changes,"Severity:","-"),
+                trustContext(trust),performance,count,status,firstSeen,lastSeen,incidentId);
+    }
+
+    private String findingAttribute(String changes,String prefix,String fallback) {
+        if(!text(changes)) return fallback;
+        try {
+            JsonNode node=mapper.readTree(changes);
+            if(node!=null&&node.isArray()) {
+                for(JsonNode item:node) {
+                    if(item.isTextual()) {
+                        String value=item.asText();
+                        if(value.regionMatches(true,0,prefix,0,prefix.length())) {
+                            String extracted=value.substring(prefix.length()).trim();
+                            if(!extracted.isEmpty()) return extracted;
+                        }
+                    }
+                }
+            }
+        } catch(Exception ignored) { }
+        return fallback;
+    }
+
+    private static String fallbackFindingType(String id){if(!text(id))return "-";if(id.startsWith("FINDING-BEHAVIOR-"))return "BEHAVIOR";if(id.startsWith("FINDING-TRANSFER-"))return "TRANSFER_BEHAVIOR";return "CONNECTION_ASSURANCE";}
+    private static String trustContext(String trust){if(!text(trust))return "-";String value=trust.toUpperCase(Locale.ROOT);return "UNVERIFIED".equals(value)?"NOT_VERIFIED":value;}
     private static List<Object> withState(List<Object> args,String state){if(text(state))args.add(args.size()-1,state);return args;}
     private static int bounded(int limit){return Math.max(1,Math.min(MAX_LIMIT,limit));}
     private static boolean text(String value){return value!=null&&!value.isBlank();}
@@ -215,7 +253,7 @@ public class PortalReadApiController {
     public record CertificateCounts(long valid,long expiring,long critical,long expired,long unknown){}
     public record FleetSummary(FleetAgents agents,FindingCounts findings,CertificateCounts certificates){}
     public record AgentItem(String id,String name,String state,Instant lastSeen,String version,String build,String gitCommit,String os,String arch,String artifactSha256,Integer protocolVersion,Integer schemaVersion,String features,String certificateSha256,Instant enrolledAt,long lastSequence){}
-    public record FindingItem(String id,String agentId,String agentName,String host,int port,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId){}
+    public record FindingItem(String id,String agentId,String agentName,String host,int port,String type,String severity,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId){}
     public record CertificateItem(String agentId,String agentName,String agentStatus,String state,String fingerprint,Instant notBefore,Instant notAfter,Instant rotatedAt){}
     public record UpgradeItem(UUID id,String agentId,String fromVersion,String fromBuild,String targetVersion,String targetBuild,String status,String os,String arch,String sourceType,String sourceRef,Instant requestedAt,String failureCode,String failureMessage){}
 }
