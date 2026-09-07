@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class AgentUpgradeService {
     private static final int MAX_LIST_LIMIT = 100;
+    private static final int MIN_SHORT_ID_LENGTH = 8;
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -89,6 +90,24 @@ public class AgentUpgradeService {
         List<AgentUpgrade> rows = jdbc.query(selectSql() + " WHERE upgrade_id=?",
                 (rs, n) -> mapUpgrade(rs), upgradeId);
         if (rows.isEmpty()) throw new UpgradeRequestException("upgrade not found: " + upgradeId);
+        return rows.getFirst();
+    }
+
+    public AgentUpgrade get(String upgradeRef) {
+        if (upgradeRef == null || upgradeRef.isBlank()) throw new IllegalArgumentException("upgrade id is required");
+        String ref = upgradeRef.trim().toLowerCase();
+        try {
+            return get(UUID.fromString(ref));
+        } catch (IllegalArgumentException ignored) {
+            // Fall through to unique short-id resolution.
+        }
+        if (ref.length() < MIN_SHORT_ID_LENGTH || ref.length() > 36 || !ref.matches("[0-9a-f-]+")) {
+            throw new IllegalArgumentException("invalid upgrade id");
+        }
+        List<AgentUpgrade> rows = jdbc.query(selectSql() + " WHERE upgrade_id::text LIKE ? ORDER BY requested_at DESC LIMIT 2",
+                (rs, n) -> mapUpgrade(rs), ref + "%");
+        if (rows.isEmpty()) throw new UpgradeRequestException("upgrade not found: " + upgradeRef);
+        if (rows.size() > 1) throw new UpgradeRequestException("upgrade id prefix is ambiguous: " + upgradeRef);
         return rows.getFirst();
     }
 
