@@ -6,6 +6,7 @@ import dev.neta.coordinator.release.ResolvedAgentRelease;
 import java.sql.ResultSet;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -81,6 +83,39 @@ class AgentUpgradeServiceTest {
         verify(jdbc, never()).update(org.mockito.ArgumentMatchers.contains("INSERT INTO agent_upgrades"), any(Object[].class));
     }
 
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void resolvesUniqueEightCharacterUpgradePrefix() {
+        UUID id = UUID.fromString("b4842965-1234-4567-89ab-0123456789ab");
+        doAnswer(invocation -> List.of(upgrade(id)))
+                .when(jdbc).query(contains("upgrade_id::text LIKE"), any(RowMapper.class), any(Object[].class));
+
+        AgentUpgrade result = service.get("b4842965");
+
+        assertEquals(id, result.upgradeId());
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void rejectsAmbiguousUpgradePrefix() {
+        doAnswer(invocation -> List.of(
+                upgrade(UUID.fromString("b4842965-1234-4567-89ab-0123456789ab")),
+                upgrade(UUID.fromString("b4842965-abcd-4567-89ab-0123456789ab"))))
+                .when(jdbc).query(contains("upgrade_id::text LIKE"), any(RowMapper.class), any(Object[].class));
+
+        AgentUpgradeService.UpgradeRequestException ex = assertThrows(
+                AgentUpgradeService.UpgradeRequestException.class,
+                () -> service.get("b4842965"));
+
+        assertTrue(ex.getMessage().contains("ambiguous"));
+    }
+
+    @Test
+    void rejectsTooShortUpgradePrefix() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.get("b484"));
+        assertTrue(ex.getMessage().contains("invalid upgrade id"));
+    }
+
     @SuppressWarnings({"rawtypes", "unchecked"})
     private void stubObservedAgent(String status, String version, String buildId, String os, String arch) throws Exception {
         doAnswer(invocation -> {
@@ -96,6 +131,18 @@ class AgentUpgradeServiceTest {
             when(rs.getString("agent_artifact_sha256")).thenReturn(OLD_SHA);
             return List.of(mapper.mapRow(rs, 0));
         }).when(jdbc).query(anyString(), any(RowMapper.class), any(Object[].class));
+    }
+
+    private static AgentUpgrade upgrade(UUID id) {
+        Instant requested = Instant.parse("2026-09-07T19:47:41Z");
+        return new AgentUpgrade(
+                id, "AGENT-1",
+                "0.1.0", "gh-old", "0".repeat(40), OLD_SHA,
+                ReleaseSourceType.GIT_REF, COMMIT, COMMIT,
+                "0.1.0", "gh-new", COMMIT, "linux", "amd64",
+                "neta-agent-linux-amd64.tar.gz", "https://example.invalid/agent.tar.gz", NEW_SHA,
+                AgentUpgradeStatus.REQUESTED, requested,
+                null, null, null, null, null, null, null, null, null);
     }
 
     private static ResolvedAgentRelease target(String os, String arch) {
