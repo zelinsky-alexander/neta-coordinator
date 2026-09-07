@@ -82,11 +82,13 @@ public class AgentUpgradeController {
     @GetMapping(value = "/upgrade", produces = MediaType.TEXT_PLAIN_VALUE)
     public String upgrade(@RequestParam("id") String id) {
         try {
-            return detail(upgrades.get(UUID.fromString(id)));
+            return detail(upgrades.get(id));
         } catch (IllegalArgumentException e) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid upgrade id", e);
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
         } catch (UpgradeRequestException e) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e);
+            HttpStatus status = e.getMessage() != null && e.getMessage().startsWith("upgrade id prefix is ambiguous")
+                    ? HttpStatus.CONFLICT : HttpStatus.NOT_FOUND;
+            throw new ResponseStatusException(status, e.getMessage(), e);
         }
     }
 
