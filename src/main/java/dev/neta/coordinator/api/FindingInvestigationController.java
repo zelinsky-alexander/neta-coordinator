@@ -97,27 +97,30 @@ public class FindingInvestigationController {
         List<Row> rows = jdbc.query("""
                 SELECT f.finding_id,f.agent_id,a.display_name,f.target_host,f.target_port,
                        f.trust_verdict,f.performance_verdict,f.occurrence_count,f.status,
-                       f.first_seen,f.last_seen,m.incident_id
+                       f.first_seen,f.last_seen,m.incident_id,f.changes::text AS changes
                 """ + from + where + " ORDER BY " + sortColumn + " " + direction + ", f.finding_id LIMIT ? OFFSET ?",
                 (rs, n) -> new Row(rs.getString("finding_id"), rs.getString("agent_id"), rs.getString("display_name"),
                         rs.getString("target_host"), rs.getInt("target_port"), rs.getString("trust_verdict"),
                         rs.getString("performance_verdict"), rs.getLong("occurrence_count"), rs.getString("status"),
-                        instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")), rs.getString("incident_id")),
+                        instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")), rs.getString("incident_id"),
+                        rs.getString("changes")),
                 rowArgs.toArray());
 
         StringBuilder out = new StringBuilder();
         out.append("Findings matched: ").append(matched == null ? 0 : matched)
                 .append("  showing: ").append(rows.size())
                 .append("  offset: ").append(boundedOffset).append("\n\n");
-        out.append(String.format("%-10s %-20s %-27s %-13s %-21s %5s %-8s %-20s %s%n",
-                "LAST SEEN","AGENT","TARGET","TRUST","PERFORMANCE","COUNT","STATUS","INCIDENT","FINDING"));
-        out.append("------------------------------------------------------------------------------------------------------------------------------------------------\n");
+        out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-15s %5s %-8s %-20s %s%n",
+                "LAST SEEN","AGENT","TARGET","TYPE","SEVERITY","TRUST CONTEXT","COUNT","STATUS","INCIDENT","FINDING"));
+        out.append("-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
         Instant now = Instant.now();
         for (Row r : rows) {
-            out.append(String.format("%-10s %-20s %-27s %-13s %-21s %5d %-8s %-20s %s%n",
+            String findingType = findingAttribute(r.changes(), "Finding type:", fallbackFindingType(r.findingId()));
+            String severity = findingAttribute(r.changes(), "Severity:", "-");
+            out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-15s %5d %-8s %-20s %s%n",
                     age(r.lastSeen(), now), trim(display(r.displayName(), r.agentId()),20),
-                    trim(r.host()+":"+r.port(),27), value(r.trust()), value(r.performance()), r.count(), value(r.status()),
-                    r.incidentId()==null?"-":r.incidentId(), r.findingId()));
+                    trim(r.host()+":"+r.port(),27), trim(value(findingType),28), value(severity), trustContext(r.trust()),
+                    r.count(), value(r.status()), r.incidentId()==null?"-":r.incidentId(), r.findingId()));
         }
         return out.toString();
     }
@@ -196,6 +199,37 @@ public class FindingInvestigationController {
         return out.toString();
     }
 
+    private String findingAttribute(String changes, String prefix, String fallback) {
+        if (!text(changes)) return fallback;
+        try {
+            JsonNode node = mapper.readTree(changes);
+            if (node != null && node.isArray()) {
+                for (JsonNode item : node) {
+                    if (item.isTextual()) {
+                        String value = item.asText();
+                        if (value.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                            String extracted = value.substring(prefix.length()).trim();
+                            if (!extracted.isEmpty()) return extracted;
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) { }
+        return fallback;
+    }
+
+    private static String fallbackFindingType(String findingId) {
+        if (!text(findingId)) return "-";
+        if (findingId.startsWith("FINDING-BEHAVIOR-")) return "BEHAVIOR";
+        if (findingId.startsWith("FINDING-TRANSFER-")) return "TRANSFER_BEHAVIOR";
+        return "CONNECTION_ASSURANCE";
+    }
+
+    private static String trustContext(String trust) {
+        String normalized = value(trust);
+        return "UNVERIFIED".equals(normalized) ? "NOT_VERIFIED" : normalized;
+    }
+
     private String pretty(String json) {
         if (!text(json)) return "{}";
         try { JsonNode node=mapper.readTree(json); return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(node); }
@@ -230,7 +264,7 @@ public class FindingInvestigationController {
     private static String age(Instant then,Instant now){ if(then==null)return "never"; long sec=Math.max(0,Duration.between(then,now).getSeconds()); if(sec<60)return sec+" sec"; long min=sec/60; if(min<60)return min+" min"; long h=min/60; if(h<48)return h+" hr"; return h/24+" day"; }
 
     private record Target(String host,Integer port){}
-    private record Row(String findingId,String agentId,String displayName,String host,int port,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId){}
+    private record Row(String findingId,String agentId,String displayName,String host,int port,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId,String changes){}
     private record Detail(String findingId,String findingKey,String messageId,String agentId,String displayName,String host,int port,String performance,String trust,String status,long count,Instant firstSeen,Instant lastSeen,Instant observedFrom,Instant observedTo,String evidenceRoot,String changes,String ruleSet,String payload,String incidentId){}
     private record Aggregate(long total,long active,long stable,long changed,long suspicious){}
     private record CountRow(String label,long count){}
