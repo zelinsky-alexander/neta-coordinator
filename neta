@@ -30,6 +30,27 @@ require_arg(){ local value="${1:-}" message="$2"; [[ -n "$value" ]] || { echo "$
 validate_limit(){ local limit="$1" label="$2"; [[ "$limit" =~ ^[0-9]+$ ]] && ((limit>=1&&limit<=100)) || { echo "$label limit must be an integer from 1 to 100" >&2; exit 2; }; }
 admin_token(){ local token="${NETA_OPERATOR_ADMIN_TOKEN:-}"; [[ -z "$token" ]] && token="$(read_env_value NETA_OPERATOR_ADMIN_TOKEN .env || true)"; [[ -n "$token" ]] || { echo "NETA_OPERATOR_ADMIN_TOKEN is not configured" >&2; exit 2; }; printf '%s' "$token"; }
 
+show_agent_ref() {
+  local base_url="$1" agent="$2" detail
+  detail="$(curl "${curl_args[@]}" --get --data-urlencode "agent=$agent" "$base_url/api/v1/operator/endpoint")"
+  printf '%s\n' "$detail" | grep -E '^(Agent:|Status:|Version:|Build ID:|Git commit:|Platform:|Last seen:)'
+}
+
+show_agent_refs() {
+  local base_url="$1" endpoints agent detail name status commit
+  endpoints="$(curl "${curl_args[@]}" "$base_url/api/v1/operator/endpoints")"
+  printf '%-24s %-12s %s\n' "AGENT" "STATUS" "GIT COMMIT"
+  printf '%s\n' '--------------------------------------------------------------------------------'
+  while read -r agent _; do
+    [[ -n "$agent" ]] || continue
+    detail="$(curl "${curl_args[@]}" --get --data-urlencode "agent=$agent" "$base_url/api/v1/operator/endpoint")"
+    name="$(printf '%s\n' "$detail" | sed -n 's/^Agent:[[:space:]]*//p' | head -n1)"
+    status="$(printf '%s\n' "$detail" | sed -n 's/^Status:[[:space:]]*//p' | head -n1)"
+    commit="$(printf '%s\n' "$detail" | sed -n 's/^Git commit:[[:space:]]*//p' | head -n1)"
+    printf '%-24s %-12s %s\n' "${name:--}" "${status:--}" "${commit:--}"
+  done < <(printf '%s\n' "$endpoints" | tail -n +3)
+}
+
 usage(){ cat <<'EOF'
 Usage:
   ./neta status
@@ -39,10 +60,13 @@ Usage:
   ./neta endpoint-history <agent-id-or-name> [--last 24h] [--type heartbeat] [--limit 100]
   ./neta agents
   ./neta agent <agent-id-or-name>
+  ./neta agent ref <agent-id-or-name>
+  ./neta agent refs
   ./neta agent revoke <agent-id-or-name> --reason TEXT --yes
   ./neta agent reactivate <agent-id-or-name> --reason TEXT --yes
   ./neta agent upgrade <agent-id-or-name> --version VERSION
   ./neta agent upgrade <agent-id-or-name> --ref GIT_REF --allow-development
+  ./neta agent upgrade <agent-id-or-name> --show-ref
   ./neta upgrades [agent-id-or-name]
   ./neta upgrade <upgrade-id>
   ./neta releases [limit]
@@ -77,8 +101,15 @@ case "$command" in
   agents) base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" "$base_url/api/v1/operator/agents" ;;
   agent)
     action="${2:-}"
+    if [[ "$action" == "ref" ]]; then
+      agent="${3:-}"; require_arg "$agent" "usage: ./neta agent ref <agent-id-or-name>"; [[ $# -eq 3 ]] || { echo "usage: ./neta agent ref <agent-id-or-name>" >&2; exit 2; }; base_url="$(resolve_base_url)"; show_agent_ref "$base_url" "$agent"; exit 0
+    fi
+    if [[ "$action" == "refs" ]]; then
+      [[ $# -eq 2 ]] || { echo "usage: ./neta agent refs" >&2; exit 2; }; base_url="$(resolve_base_url)"; show_agent_refs "$base_url"; exit 0
+    fi
     if [[ "$action" == "upgrade" ]]; then
-      agent="${3:-}"; require_arg "$agent" "usage: ./neta agent upgrade <agent> --version VERSION | --ref GIT_REF --allow-development"; shift 3
+      agent="${3:-}"; require_arg "$agent" "usage: ./neta agent upgrade <agent> --version VERSION | --ref GIT_REF --allow-development | --show-ref"; shift 3
+      if [[ $# -eq 1 && "$1" == "--show-ref" ]]; then base_url="$(resolve_base_url)"; show_agent_ref "$base_url" "$agent"; exit 0; fi
       version=""; ref=""; allow_development="false"
       while (($#)); do case "$1" in --version) require_arg "${2:-}" "--version requires a value"; version="$2"; shift 2;; --ref) require_arg "${2:-}" "--ref requires a value"; ref="$2"; shift 2;; --allow-development) allow_development="true"; shift;; *) echo "unknown agent upgrade option: $1" >&2; exit 2;; esac; done
       if [[ -n "$version" && -n "$ref" ]]; then echo "specify exactly one of --version or --ref" >&2; exit 2; fi
