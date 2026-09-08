@@ -39,7 +39,7 @@ class AgentUpgradeRequestServiceTest {
 
     @Test
     void normalReleaseUsesObservedAgentPlatformAndCreatesRequest() throws Exception {
-        stubAgent("agent-1", "AWS-ARM", "ACTIVE", "linux", "arm64");
+        stubAgent("agent-1", "AWS-ARM", "ACTIVE", "linux", "arm64", "1.3.2", "old-build", "0".repeat(40), "b".repeat(64));
         ResolvedAgentRelease target = target(ReleaseSourceType.RELEASE, "1.4.0", "linux", "arm64");
         AgentUpgrade created = upgrade(target);
         when(releases.resolve(ReleaseSourceType.RELEASE, "1.4.0", "linux", "arm64")).thenReturn(target);
@@ -63,7 +63,7 @@ class AgentUpgradeRequestServiceTest {
 
     @Test
     void refusesAgentWithoutCompletePlatformIdentity() throws Exception {
-        stubAgent("agent-1", "AWS-ARM", "ACTIVE", "linux", null);
+        stubAgent("agent-1", "AWS-ARM", "ACTIVE", "linux", null, "1.3.2", "old-build", "0".repeat(40), "b".repeat(64));
 
         AgentUpgradeService.UpgradeRequestException ex = assertThrows(
                 AgentUpgradeService.UpgradeRequestException.class,
@@ -73,8 +73,25 @@ class AgentUpgradeRequestServiceTest {
         verify(releases, never()).resolve(any(), anyString(), anyString(), anyString());
     }
 
+    @Test
+    void refusesUpgradeWhenAgentAlreadyRunsResolvedBuild() throws Exception {
+        ResolvedAgentRelease target = target(ReleaseSourceType.GIT_REF, "main", "windows", "amd64");
+        stubAgent("agent-1", "desktop-win10", "ACTIVE", "windows", "amd64",
+                target.version(), target.buildId(), target.gitCommit(), target.artifactSha256());
+        when(releases.resolve(ReleaseSourceType.GIT_REF, "main", "windows", "amd64")).thenReturn(target);
+
+        AgentUpgradeService.UpgradeRequestException ex = assertThrows(
+                AgentUpgradeService.UpgradeRequestException.class,
+                () -> service.request("desktop-win10", ReleaseSourceType.GIT_REF, "main", true));
+
+        assertTrue(ex.getMessage().contains("nothing to upgrade"));
+        assertTrue(ex.getMessage().contains(target.buildId()));
+        verify(upgrades, never()).createRequest(anyString(), any());
+    }
+
     @SuppressWarnings({"rawtypes", "unchecked"})
-    private void stubAgent(String id, String name, String status, String os, String arch) throws Exception {
+    private void stubAgent(String id, String name, String status, String os, String arch,
+                           String version, String buildId, String gitCommit, String artifactSha256) throws Exception {
         doAnswer(invocation -> {
             RowMapper mapper = invocation.getArgument(1);
             ResultSet rs = mock(ResultSet.class);
@@ -83,6 +100,10 @@ class AgentUpgradeRequestServiceTest {
             when(rs.getString("status")).thenReturn(status);
             when(rs.getString("agent_os")).thenReturn(os);
             when(rs.getString("agent_arch")).thenReturn(arch);
+            when(rs.getString("agent_version")).thenReturn(version);
+            when(rs.getString("agent_build_id")).thenReturn(buildId);
+            when(rs.getString("agent_git_commit")).thenReturn(gitCommit);
+            when(rs.getString("agent_artifact_sha256")).thenReturn(artifactSha256);
             return List.of(mapper.mapRow(rs, 0));
         }).when(jdbc).query(anyString(), any(RowMapper.class), any(Object[].class));
     }
