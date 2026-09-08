@@ -14,6 +14,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -64,50 +65,84 @@ public class GitHubAgentReleaseResolver {
         JsonNode release = fetchJson(api("/repos/%s/%s/releases/tags/%s".formatted(
                 segment(properties.owner()), segment(properties.repository()), segment(releaseTag))),
                 "GitHub release " + releaseTag);
-        if (release.path("draft").asBoolean(false)) {
-            throw new ResolutionException("release is still a draft: " + releaseTag);
-        }
-        if (requirePrerelease && !release.path("prerelease").asBoolean(false)) {
-            throw new ResolutionException("git-ref builds must be published as GitHub prereleases");
-        }
+        if (release.path("draft").asBoolean(false)) throw new ResolutionException("release is still a draft: " + releaseTag);
+        if (requirePrerelease && !release.path("prerelease").asBoolean(false)) throw new ResolutionException("git-ref builds must be published as GitHub prereleases");
 
-        JsonNode manifestAsset = assetByName(release, properties.manifestAsset());
-        if (manifestAsset == null) {
-            throw new ResolutionException("release manifest asset is missing: " + properties.manifestAsset());
-        }
-        URI manifestUri = trustedDownloadUri(text(manifestAsset, "browser_download_url", true));
-        JsonNode manifest = parseJson(fetcher.getText(manifestUri), "release manifest");
-
-        String version = text(manifest, "version", true);
-        String buildId = text(manifest, "build_id", true);
-        String gitCommit = canonical(text(manifest, "git_commit", true));
-        if (!gitCommit.matches(COMMIT_PATTERN)) {
-            throw new ResolutionException("release manifest git_commit must be a full 40-character commit SHA");
-        }
-        if (expectedVersion != null && !normalizeVersion(version).equals(expectedVersion)) {
-            throw new ResolutionException("release manifest version does not match requested version");
-        }
-        if (sourceCommit != null && !gitCommit.equals(sourceCommit)) {
-            throw new ResolutionException("development release manifest commit does not match resolved git ref");
-        }
-        if (sourceCommit == null) sourceCommit = gitCommit;
-
-        JsonNode artifact = findManifestArtifact(manifest.path("artifacts"), os, arch);
-        String artifactName = text(artifact, "name", true);
-        String artifactSha256 = normalizeSha256(text(artifact, "sha256", true));
-        JsonNode releaseAsset = assetByName(release, artifactName);
-        if (releaseAsset == null) {
-            throw new ResolutionException("manifest artifact is not present in the GitHub release: " + artifactName);
-        }
-        String artifactUrl = trustedDownloadUri(text(releaseAsset, "browser_download_url", true)).toString();
-        Instant publishedAt = instant(manifest.path("published_at"));
-        if (publishedAt == null) publishedAt = instant(release.path("published_at"));
-
-        ResolvedAgentRelease resolved = new ResolvedAgentRelease(
-                sourceType, ref, sourceCommit, version, buildId, gitCommit, os, arch,
-                artifactName, artifactUrl, artifactSha256, publishedAt);
+        ResolvedAgentRelease resolved = resolveFromRelease(release, sourceType, ref, sourceCommit, expectedVersion, os, arch);
         persist(resolved);
         return resolved;
+    }
+
+    public List<ResolvedAgentRelease> livePublished(int limit, String platform) {
+        int bounded = Math.max(1, Math.min(limit, 100));
+        String wantedPlatform = platform == null || platform.isBlank() ? null : canonical(platform);
+        JsonNode releases = parseJsonNode(fetcher.getText(api("/repos/%s/%s/releases?per_page=100".formatted(
+                segment(properties.owner()), segment(properties.repository())))), "GitHub releases");
+        if (!releases.isArray()) throw new ResolutionException("GitHub releases response must be a JSON array");
+
+        List<ResolvedAgentRelease> rows = new ArrayList<>();
+        for (JsonNode release : releases) {
+            if (!release.isObject() || release.path("draft").asBoolean(false)) continue;
+            String tag = text(release, "tag_name", false);
+            if (tag == null) continue;
+            ReleaseSourceType sourceType;
+            String sourceRef;
+            String expectedVersion = null;
+            String sourceCommit = null;
+            if (tag.startsWith("dev-")) {
+                sourceType = ReleaseSourceType.GIT_REF;
+                sourceRef = canonical(tag.substring(4));
+                if (!sourceRef.matches(COMMIT_PATTERN)) continue;
+                sourceCommit = sourceRef;
+            } else {
+                sourceType = ReleaseSourceType.RELEASE;
+                sourceRef = tag.startsWith("v") ? tag.substring(1) : tag;
+                expectedVersion = normalizeVersion(sourceRef);
+            }
+
+            JsonNode manifestAsset = assetByName(release, properties.manifestAsset());
+            if (manifestAsset == null) continue;
+            JsonNode manifest;
+            try {
+                manifest = parseJson(fetcher.getText(trustedDownloadUri(text(manifestAsset, "browser_download_url", true))), "release manifest");
+            } catch (ResolutionException e) {
+                continue;
+            }
+            String version = text(manifest, "version", true);
+            String buildId = text(manifest, "build_id", true);
+            String gitCommit = canonical(text(manifest, "git_commit", true));
+            if (!gitCommit.matches(COMMIT_PATTERN)) continue;
+            if (sourceType == ReleaseSourceType.GIT_REF && !gitCommit.equals(sourceCommit)) continue;
+            if (expectedVersion != null && !normalizeVersion(version).equals(expectedVersion)) continue;
+            if (sourceCommit == null) sourceCommit = gitCommit;
+            Instant publishedAt = instant(manifest.path("published_at"));
+            if (publishedAt == null) publishedAt = instant(release.path("published_at"));
+
+            JsonNode artifacts = manifest.path("artifacts");
+            if (!artifacts.isArray()) continue;
+            for (JsonNode artifact : artifacts) {
+                if (!artifact.isObject()) continue;
+                String os = canonical(text(artifact, "os", false));
+                String arch = canonical(text(artifact, "arch", false));
+                if (os == null || arch == null) continue;
+                String candidatePlatform = os + "/" + arch;
+                if (wantedPlatform != null && !wantedPlatform.equals(candidatePlatform)) continue;
+                String artifactName = text(artifact, "name", false);
+                String sha = text(artifact, "sha256", false);
+                if (artifactName == null || sha == null) continue;
+                JsonNode releaseAsset = assetByName(release, artifactName);
+                if (releaseAsset == null) continue;
+                ResolvedAgentRelease row = new ResolvedAgentRelease(sourceType, sourceRef, sourceCommit, version, buildId,
+                        gitCommit, os, arch, artifactName,
+                        trustedDownloadUri(text(releaseAsset, "browser_download_url", true)).toString(),
+                        normalizeSha256(sha), publishedAt);
+                persist(row);
+                rows.add(row);
+            }
+        }
+        rows.sort(Comparator.comparing(ResolvedAgentRelease::publishedAt,
+                Comparator.nullsLast(Comparator.reverseOrder())));
+        return rows.size() <= bounded ? rows : new ArrayList<>(rows.subList(0, bounded));
     }
 
     public List<ResolvedAgentRelease> recent(int limit) {
@@ -124,6 +159,30 @@ public class GitHubAgentReleaseResolver {
                 rs.getString("git_commit"), rs.getString("os"), rs.getString("arch"),
                 rs.getString("artifact_name"), rs.getString("artifact_url"), rs.getString("artifact_sha256"),
                 toInstant(rs.getTimestamp("published_at"))), bounded);
+    }
+
+    private ResolvedAgentRelease resolveFromRelease(JsonNode release, ReleaseSourceType sourceType, String ref,
+                                                    String sourceCommit, String expectedVersion, String os, String arch) {
+        JsonNode manifestAsset = assetByName(release, properties.manifestAsset());
+        if (manifestAsset == null) throw new ResolutionException("release manifest asset is missing: " + properties.manifestAsset());
+        JsonNode manifest = parseJson(fetcher.getText(trustedDownloadUri(text(manifestAsset, "browser_download_url", true))), "release manifest");
+        String version = text(manifest, "version", true);
+        String buildId = text(manifest, "build_id", true);
+        String gitCommit = canonical(text(manifest, "git_commit", true));
+        if (!gitCommit.matches(COMMIT_PATTERN)) throw new ResolutionException("release manifest git_commit must be a full 40-character commit SHA");
+        if (expectedVersion != null && !normalizeVersion(version).equals(expectedVersion)) throw new ResolutionException("release manifest version does not match requested version");
+        if (sourceCommit != null && !gitCommit.equals(sourceCommit)) throw new ResolutionException("development release manifest commit does not match resolved git ref");
+        if (sourceCommit == null) sourceCommit = gitCommit;
+        JsonNode artifact = findManifestArtifact(manifest.path("artifacts"), os, arch);
+        String artifactName = text(artifact, "name", true);
+        String artifactSha256 = normalizeSha256(text(artifact, "sha256", true));
+        JsonNode releaseAsset = assetByName(release, artifactName);
+        if (releaseAsset == null) throw new ResolutionException("manifest artifact is not present in the GitHub release: " + artifactName);
+        String artifactUrl = trustedDownloadUri(text(releaseAsset, "browser_download_url", true)).toString();
+        Instant publishedAt = instant(manifest.path("published_at"));
+        if (publishedAt == null) publishedAt = instant(release.path("published_at"));
+        return new ResolvedAgentRelease(sourceType, ref, sourceCommit, version, buildId, gitCommit, os, arch,
+                artifactName, artifactUrl, artifactSha256, publishedAt);
     }
 
     private String resolveCommit(String ref) {
@@ -146,24 +205,22 @@ public class GitHubAgentReleaseResolver {
                               published_at=EXCLUDED.published_at,discovered_at=now()
                 """, release.sourceType().name(), release.sourceRef(), release.sourceCommit(), release.version(),
                 release.buildId(), release.gitCommit(), release.os(), release.arch(), release.artifactName(),
-                release.artifactUrl(), release.artifactSha256(),
-                release.publishedAt() == null ? null : Timestamp.from(release.publishedAt()));
+                release.artifactUrl(), release.artifactSha256(), release.publishedAt() == null ? null : Timestamp.from(release.publishedAt()));
     }
 
-    private JsonNode fetchJson(URI uri, String label) {
-        return parseJson(fetcher.getText(uri), label);
-    }
-
+    private JsonNode fetchJson(URI uri, String label) { return parseJson(fetcher.getText(uri), label); }
     private JsonNode parseJson(String body, String label) {
+        JsonNode node = parseJsonNode(body, label);
+        if (!node.isObject()) throw new ResolutionException(label + " must be a JSON object");
+        return node;
+    }
+    private JsonNode parseJsonNode(String body, String label) {
         try {
             JsonNode node = mapper.readTree(body);
-            if (node == null || !node.isObject()) throw new ResolutionException(label + " must be a JSON object");
+            if (node == null) throw new ResolutionException(label + " must be JSON");
             return node;
-        } catch (ResolutionException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ResolutionException("invalid JSON returned for " + label, e);
-        }
+        } catch (ResolutionException e) { throw e; }
+        catch (Exception e) { throw new ResolutionException("invalid JSON returned for " + label, e); }
     }
 
     private static JsonNode findManifestArtifact(JsonNode artifacts, String os, String arch) {
@@ -193,14 +250,10 @@ public class GitHubAgentReleaseResolver {
         return match;
     }
 
-    private URI api(String path) {
-        return URI.create(properties.apiBase().replaceAll("/+$", "") + path);
-    }
-
+    private URI api(String path) { return URI.create(properties.apiBase().replaceAll("/+$", "") + path); }
     private static URI trustedDownloadUri(String value) {
         URI uri;
-        try { uri = URI.create(value); }
-        catch (RuntimeException e) { throw new ResolutionException("release asset URL is invalid", e); }
+        try { uri = URI.create(value); } catch (RuntimeException e) { throw new ResolutionException("release asset URL is invalid", e); }
         if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null ||
                 !("github.com".equalsIgnoreCase(uri.getHost()) || uri.getHost().toLowerCase(Locale.ROOT).endsWith(".githubusercontent.com"))) {
             throw new ResolutionException("release asset URL must be an HTTPS GitHub URL");
@@ -212,89 +265,49 @@ public class GitHubAgentReleaseResolver {
         String trimmed = requireText(value, "version", 128).trim();
         return trimmed.matches("v\\d.*") ? trimmed.substring(1) : trimmed;
     }
-
     private static String normalizeSha256(String value) {
         String normalized = canonical(value);
         if (normalized.startsWith("sha256:")) normalized = normalized.substring(7);
         if (!normalized.matches(SHA256_PATTERN)) throw new ResolutionException("artifact sha256 is invalid");
         return normalized;
     }
-
     private static String text(JsonNode node, String field, boolean required) {
         JsonNode value = node == null ? null : node.get(field);
-        if (value == null || value.isNull()) {
-            if (required) throw new ResolutionException(field + " is required");
-            return null;
-        }
-        if (!value.isTextual() || value.asText().isBlank()) {
-            if (required) throw new ResolutionException(field + " must be non-empty text");
-            return null;
-        }
+        if (value == null || value.isNull()) { if (required) throw new ResolutionException(field + " is required"); return null; }
+        if (!value.isTextual() || value.asText().isBlank()) { if (required) throw new ResolutionException(field + " must be non-empty text"); return null; }
         return value.asText();
     }
-
     private static Instant instant(JsonNode node) {
         if (node == null || !node.isTextual() || node.asText().isBlank()) return null;
-        try { return Instant.parse(node.asText()); }
-        catch (RuntimeException e) { throw new ResolutionException("published_at must be an ISO-8601 instant"); }
+        try { return Instant.parse(node.asText()); } catch (RuntimeException e) { throw new ResolutionException("published_at must be an ISO-8601 instant"); }
     }
-
     private static String requireText(String value, String field, int maxLength) {
         if (value == null || value.isBlank()) throw new IllegalArgumentException(field + " is required");
         if (value.length() > maxLength) throw new IllegalArgumentException(field + " is too long");
         return value;
     }
+    private static String canonical(String value) { return value == null ? null : value.trim().toLowerCase(Locale.ROOT); }
+    private static String segment(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20"); }
+    private static Instant toInstant(Timestamp timestamp) { return timestamp == null ? null : timestamp.toInstant(); }
 
-    private static String canonical(String value) {
-        return value == null ? null : value.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private static String segment(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
-    }
-
-    private static Instant toInstant(Timestamp timestamp) {
-        return timestamp == null ? null : timestamp.toInstant();
-    }
-
-    interface Fetcher {
-        String getText(URI uri);
-    }
-
+    interface Fetcher { String getText(URI uri); }
     private static final class HttpFetcher implements Fetcher {
-        private final HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
+        private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).followRedirects(HttpClient.Redirect.NORMAL).build();
         private final AgentReleaseProperties properties;
-
-        private HttpFetcher(AgentReleaseProperties properties) {
-            this.properties = properties;
-        }
-
-        @Override
-        public String getText(URI uri) {
-            HttpRequest.Builder request = HttpRequest.newBuilder(uri)
-                    .timeout(Duration.ofSeconds(15))
-                    .header("Accept", "application/vnd.github+json")
-                    .header("User-Agent", "neta-coordinator")
-                    .GET();
+        private HttpFetcher(AgentReleaseProperties properties) { this.properties = properties; }
+        @Override public String getText(URI uri) {
+            HttpRequest.Builder request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(15)).header("Accept", "application/vnd.github+json").header("User-Agent", "neta-coordinator").GET();
             if (!properties.githubToken().isBlank() && "api.github.com".equalsIgnoreCase(uri.getHost())) {
                 request.header("Authorization", "Bearer " + properties.githubToken());
                 request.header("X-GitHub-Api-Version", "2022-11-28");
             }
             try {
                 HttpResponse<String> response = client.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                    throw new ResolutionException("GitHub request failed with HTTP " + response.statusCode() + " for " + uri.getPath());
-                }
+                if (response.statusCode() < 200 || response.statusCode() >= 300) throw new ResolutionException("GitHub request failed with HTTP " + response.statusCode() + " for " + uri.getPath());
                 return response.body();
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new ResolutionException("GitHub request was interrupted", e);
-            } catch (IOException e) {
-                throw new ResolutionException("GitHub request failed", e);
-            }
+                Thread.currentThread().interrupt(); throw new ResolutionException("GitHub request was interrupted", e);
+            } catch (IOException e) { throw new ResolutionException("GitHub request failed", e); }
         }
     }
 
