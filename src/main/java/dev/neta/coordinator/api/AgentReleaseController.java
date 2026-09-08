@@ -18,9 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 public class AgentReleaseController {
     private final GitHubAgentReleaseResolver resolver;
 
-    public AgentReleaseController(GitHubAgentReleaseResolver resolver) {
-        this.resolver = resolver;
-    }
+    public AgentReleaseController(GitHubAgentReleaseResolver resolver) { this.resolver = resolver; }
 
     @GetMapping(value = "/release-resolve", produces = MediaType.TEXT_PLAIN_VALUE)
     public String resolve(@RequestParam(defaultValue = "release") String source,
@@ -38,8 +36,26 @@ public class AgentReleaseController {
     }
 
     @GetMapping(value = "/releases", produces = MediaType.TEXT_PLAIN_VALUE)
-    public String releases(@RequestParam(defaultValue = "20") int limit) {
-        List<ResolvedAgentRelease> rows = resolver.recent(limit);
+    public String releases(@RequestParam(defaultValue = "20") int limit,
+                           @RequestParam(required = false) String platform,
+                           @RequestParam(defaultValue = "false") boolean latest) {
+        if (limit < 1 || limit > 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be 1..100");
+        try {
+            List<ResolvedAgentRelease> rows = resolver.livePublished(100, platform);
+            if (latest && !rows.isEmpty()) {
+                String newestRef = rows.getFirst().sourceRef();
+                rows = rows.stream().filter(row -> newestRef.equals(row.sourceRef())).toList();
+            }
+            if (rows.size() > limit) rows = rows.subList(0, limit);
+            return table(rows);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        } catch (ResolutionException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, e.getMessage(), e);
+        }
+    }
+
+    private static String table(List<ResolvedAgentRelease> rows) {
         StringBuilder out = new StringBuilder();
         out.append(String.format("%-9s %-40s %-12s %-16s %-18s %-12s %s%n",
                 "SOURCE", "REF", "VERSION", "BUILD", "PLATFORM", "COMMIT", "ARTIFACT"));
@@ -47,10 +63,10 @@ public class AgentReleaseController {
         for (ResolvedAgentRelease row : rows) {
             out.append(String.format("%-9s %-40s %-12s %-16s %-18s %-12s %s%n",
                     row.sourceType() == ReleaseSourceType.RELEASE ? "release" : "git-ref",
-                    trim(row.sourceRef(), 40), trim(row.version(), 12), trim(row.buildId(), 16),
+                    row.sourceRef(), trim(row.version(), 12), trim(row.buildId(), 16),
                     trim(row.os() + "/" + row.arch(), 18), shortCommit(row.sourceCommit()), row.artifactName()));
         }
-        if (rows.isEmpty()) out.append("(no resolved releases)\n");
+        if (rows.isEmpty()) out.append("(no published releases match)\n");
         return out.toString();
     }
 
@@ -70,16 +86,7 @@ public class AgentReleaseController {
         return out.toString();
     }
 
-    private static void line(StringBuilder out, String label, String value) {
-        out.append(String.format("%-18s %s%n", label + ":", value == null || value.isBlank() ? "-" : value));
-    }
-
-    private static String trim(String value, int width) {
-        if (value == null || value.isBlank()) return "-";
-        return value.length() <= width ? value : value.substring(0, width - 1) + "…";
-    }
-
-    private static String shortCommit(String value) {
-        return value == null || value.length() < 12 ? value : value.substring(0, 12);
-    }
+    private static void line(StringBuilder out, String label, String value) { out.append(String.format("%-18s %s%n", label + ":", value == null || value.isBlank() ? "-" : value)); }
+    private static String trim(String value, int width) { if (value == null || value.isBlank()) return "-"; return value.length() <= width ? value : value.substring(0, width - 1) + "…"; }
+    private static String shortCommit(String value) { return value == null || value.length() < 12 ? value : value.substring(0, 12); }
 }
