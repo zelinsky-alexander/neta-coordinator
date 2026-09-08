@@ -39,14 +39,30 @@ public class IncidentService {
 
     public void assignFinding(String findingId) {
         List<FindingRef> rows = jdbc.query("""
-                SELECT finding_id, agent_id, target_host, target_port, first_seen, last_seen
+                SELECT finding_id, agent_id, target_host, target_port, subject_type, subject_id, first_seen, last_seen
                 FROM findings WHERE finding_id=?
-                """, (rs, n) -> new FindingRef(
-                rs.getString("finding_id"), rs.getString("agent_id"), rs.getString("target_host"),
-                rs.getInt("target_port"), rs.getTimestamp("first_seen").toInstant(),
-                rs.getTimestamp("last_seen").toInstant()), findingId);
+                """, (rs, n) -> {
+                    String targetHost = rs.getString("target_host");
+                    Integer targetPort = rs.getObject("target_port", Integer.class);
+                    String subjectType = rs.getString("subject_type");
+                    String subjectId = rs.getString("subject_id");
+                    String groupingHost = targetHost;
+                    int groupingPort = targetPort == null ? 0 : targetPort;
+                    if (groupingHost == null && subjectType != null && subjectId != null) {
+                        // Incidents remain backward-compatible and target-shaped. Generic
+                        // subjects receive a reserved internal grouping key; the finding
+                        // itself keeps its true target columns NULL and subject columns set.
+                        groupingHost = "subject:" + subjectType + ":" + subjectId;
+                        groupingPort = 1;
+                    }
+                    return new FindingRef(
+                            rs.getString("finding_id"), rs.getString("agent_id"), groupingHost,
+                            groupingPort, rs.getTimestamp("first_seen").toInstant(),
+                            rs.getTimestamp("last_seen").toInstant());
+                }, findingId);
         if (rows.isEmpty()) return;
         FindingRef finding = rows.getFirst();
+        if (finding.targetHost() == null || finding.targetPort() < 1) return;
 
         List<String> existing = jdbc.query(
                 "SELECT incident_id FROM incident_findings WHERE finding_id=?",
