@@ -93,6 +93,9 @@ public class FindingDispositionController {
                 """, finding.agentId(), finding.findingKey(), disposition, reason,
                 finding.ruleId(), finding.subjectType(), finding.subjectId());
 
+        // Corroboration is retained as historical control-plane evidence, but its
+        // nullable finding reference must be detached before deleting the finding.
+        jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?", finding.findingId());
         jdbc.update("DELETE FROM incident_findings WHERE finding_id=?", finding.findingId());
         jdbc.update("DELETE FROM findings WHERE finding_id=?", finding.findingId());
         jdbc.update("DELETE FROM incidents i WHERE NOT EXISTS (SELECT 1 FROM incident_findings m WHERE m.incident_id=i.incident_id)");
