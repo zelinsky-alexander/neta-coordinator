@@ -151,20 +151,80 @@ public class MessageIngestService {
         JsonNode p = e.payload();
         if (e.messageType() == MessageType.FINDING_ANNOUNCEMENT) {
             JsonNode target = p.path("target");
+            JsonNode subject = p.path("subject");
             String host = text(target, "host");
             int port = target.path("port").asInt(-1);
+            String transport = text(target, "transport");
             String findingId = text(p, "finding_id");
-            if (findingId == null || findingId.isBlank()) throw ProtocolException.badRequest("FindingAnnouncement.finding_id is required");
-            if (host == null || port < 1 || port > 65535) throw ProtocolException.badRequest("FindingAnnouncement.target host/port are required");
+            if (findingId == null || findingId.isBlank())
+                throw ProtocolException.badRequest("FindingAnnouncement.finding_id is required");
+
+            String subjectType = text(subject, "type");
+            String subjectId = text(subject, "id");
+            boolean explicitSubject = subjectType != null && !subjectType.isBlank()
+                    && subjectId != null && !subjectId.isBlank();
+            boolean processMarker = "process".equalsIgnoreCase(nullSafe(transport))
+                    && host != null && host.startsWith("process:") && host.length() > "process:".length();
+
+            String storedHost = host;
+            Integer storedPort = port >= 1 && port <= 65535 ? port : null;
+            if (processMarker) {
+                subjectType = "PROCESS";
+                subjectId = host.substring("process:".length());
+                explicitSubject = true;
+                storedHost = null;
+                storedPort = null;
+            }
+
+            if (!explicitSubject && (host == null || storedPort == null))
+                throw ProtocolException.badRequest("FindingAnnouncement.target host/port or subject are required");
+            if (explicitSubject && (subjectType == null || subjectId == null))
+                throw ProtocolException.badRequest("FindingAnnouncement.subject type/id are required");
+
             String findingKey = text(p, "finding_key");
-            if (findingKey == null || findingKey.isBlank()) findingKey = host + ":" + port + "|" + nullSafe(text(p, "performance_verdict")) + "|" + nullSafe(text(p, "trust_verdict"));
+            if (findingKey == null || findingKey.isBlank()) {
+                if (explicitSubject) {
+                    findingKey = subjectType + ":" + subjectId + "|"
+                            + nullSafe(text(p, "performance_verdict")) + "|"
+                            + nullSafe(text(p, "trust_verdict"));
+                } else {
+                    findingKey = host + ":" + storedPort + "|"
+                            + nullSafe(text(p, "performance_verdict")) + "|"
+                            + nullSafe(text(p, "trust_verdict"));
+                }
+            }
+
+            String ruleId = text(p, "rule_id");
+            if (ruleId == null || ruleId.isBlank()) ruleId = ruleIdFromFindingKey(findingKey);
+            String severity = text(p, "severity");
+            if (severity == null || severity.isBlank()) severity = changeValue(p.path("changes"), "Severity: ");
+
             jdbc.update("UPDATE findings SET finding_key=? WHERE agent_id=? AND finding_id=? AND finding_key<>? AND NOT EXISTS (SELECT 1 FROM findings other WHERE other.agent_id=? AND other.finding_key=? AND other.finding_id<>?)",
                     findingKey, e.agentId(), findingId, findingKey, e.agentId(), findingKey, findingId);
             jdbc.update("""
-                    INSERT INTO findings(finding_id,finding_key,message_id,agent_id,target_host,target_port,observed_from,observed_to,changes,performance_verdict,trust_verdict,rule_set,evidence_root,payload,first_seen,last_seen,occurrence_count,status)
-                    VALUES (?,?,?,?,?,?,?, ?,CAST(? AS jsonb),?,?,CAST(? AS jsonb),?,CAST(? AS jsonb),now(),now(),1,'ACTIVE')
-                    ON CONFLICT (agent_id,finding_key) DO UPDATE SET message_id=EXCLUDED.message_id,observed_from=COALESCE(findings.observed_from,EXCLUDED.observed_from),observed_to=COALESCE(EXCLUDED.observed_to,findings.observed_to),changes=EXCLUDED.changes,performance_verdict=EXCLUDED.performance_verdict,trust_verdict=EXCLUDED.trust_verdict,rule_set=EXCLUDED.rule_set,evidence_root=EXCLUDED.evidence_root,payload=EXCLUDED.payload,last_seen=now(),occurrence_count=findings.occurrence_count+1,status='ACTIVE'
-                    """, findingId, findingKey, e.messageId(), e.agentId(), host, port,
+                    INSERT INTO findings(finding_id,finding_key,message_id,agent_id,target_host,target_port,subject_type,subject_id,severity,rule_id,observed_from,observed_to,changes,performance_verdict,trust_verdict,rule_set,evidence_root,payload,first_seen,last_seen,occurrence_count,status)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,CAST(? AS jsonb),?,?,CAST(? AS jsonb),?,CAST(? AS jsonb),now(),now(),1,'ACTIVE')
+                    ON CONFLICT (agent_id,finding_key) DO UPDATE SET
+                        message_id=EXCLUDED.message_id,
+                        target_host=EXCLUDED.target_host,
+                        target_port=EXCLUDED.target_port,
+                        subject_type=COALESCE(EXCLUDED.subject_type,findings.subject_type),
+                        subject_id=COALESCE(EXCLUDED.subject_id,findings.subject_id),
+                        severity=COALESCE(EXCLUDED.severity,findings.severity),
+                        rule_id=COALESCE(EXCLUDED.rule_id,findings.rule_id),
+                        observed_from=COALESCE(findings.observed_from,EXCLUDED.observed_from),
+                        observed_to=COALESCE(EXCLUDED.observed_to,findings.observed_to),
+                        changes=EXCLUDED.changes,
+                        performance_verdict=EXCLUDED.performance_verdict,
+                        trust_verdict=EXCLUDED.trust_verdict,
+                        rule_set=EXCLUDED.rule_set,
+                        evidence_root=EXCLUDED.evidence_root,
+                        payload=EXCLUDED.payload,
+                        last_seen=now(),
+                        occurrence_count=findings.occurrence_count+1,
+                        status='ACTIVE'
+                    """, findingId, findingKey, e.messageId(), e.agentId(), storedHost, storedPort,
+                    subjectType, subjectId, severity, ruleId,
                     timestamp(p.path("observation_window").path("from")), timestamp(p.path("observation_window").path("to")),
                     json(p.path("changes")), text(p,"performance_verdict"), text(p,"trust_verdict"), json(p.path("rule_set")), text(p,"evidence_root"), json(p));
         } else if (e.messageType() == MessageType.CORROBORATION_RESPONSE) {
@@ -187,6 +247,20 @@ public class MessageIngestService {
     }
     private static String text(JsonNode node, String field) { JsonNode v = node.path(field); return v.isTextual() ? v.asText() : null; }
     private static String nullSafe(String value) { return value == null ? "" : value; }
+    private static String ruleIdFromFindingKey(String findingKey) {
+        if (findingKey == null || findingKey.isBlank()) return null;
+        int separator = findingKey.indexOf('|');
+        return separator > 0 ? findingKey.substring(0, separator) : null;
+    }
+    private static String changeValue(JsonNode changes, String prefix) {
+        if (!changes.isArray()) return null;
+        for (JsonNode change : changes) {
+            if (!change.isTextual()) continue;
+            String value = change.asText();
+            if (value.startsWith(prefix)) return value.substring(prefix.length());
+        }
+        return null;
+    }
     private static Timestamp timestamp(JsonNode node) {
         if (!node.isTextual() || node.asText().isBlank()) return null;
         try { return Timestamp.from(Instant.parse(node.asText())); }
