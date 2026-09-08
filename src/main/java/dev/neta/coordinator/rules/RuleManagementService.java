@@ -21,8 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class RuleManagementService {
-    private static final Set<String> SUPPORTED_ENGINES = Set.of(
-            "NETA-PERF-001", "NETA-TRUST-001", "NETA-TRUST-002",
+    private static final Set<String> CUSTOM_ENGINES = Set.of(
             "NETA-PROC-001", "NETA-PROC-002", "NETA-PROC-003", "NETA-PROC-004", "NETA-PROC-005");
 
     private final JdbcTemplate jdbc;
@@ -50,7 +49,9 @@ public class RuleManagementService {
     public ManagedRule createCustom(String requestedId, String engineRuleId, String name, String severity,
                                     boolean enabled, JsonNode parameters, String actor) {
         String engine = required(engineRuleId, "engineRuleId").toUpperCase(Locale.ROOT);
-        if (!SUPPORTED_ENGINES.contains(engine)) throw new IllegalArgumentException("unsupported engineRuleId: " + engine);
+        if (!CUSTOM_ENGINES.contains(engine)) {
+            throw new IllegalArgumentException("custom rules currently support process engines NETA-PROC-001 through NETA-PROC-005");
+        }
         String id = requestedId == null || requestedId.isBlank()
                 ? "CUS-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT)
                 : requestedId.trim().toUpperCase(Locale.ROOT);
@@ -60,11 +61,11 @@ public class RuleManagementService {
         if (!Set.of("low", "medium", "high").contains(normalizedSeverity)) throw new IllegalArgumentException("severity must be low, medium, or high");
         JsonNode params = parameters == null ? json.createObjectNode() : parameters;
         if (!params.isObject()) throw new IllegalArgumentException("parameters must be a JSON object");
-        String category = engineCategory(engine);
+        validateParametersAgainstEngine(engine, params);
         jdbc.update("""
                 INSERT INTO rule_definitions(rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,parameters_json,created_by)
                 VALUES (?,1,'CUSTOM',?,?,?,?,?,?::jsonb,?)
-                """, id, engine, required(name, "name"), category, normalizedSeverity, enabled, write(params), actorValue(actor));
+                """, id, engine, required(name, "name"), "process", normalizedSeverity, enabled, write(params), actorValue(actor));
         return current(id);
     }
 
@@ -77,6 +78,7 @@ public class RuleManagementService {
         if (!Set.of("low", "medium", "high").contains(nextSeverity)) throw new IllegalArgumentException("severity must be low, medium, or high");
         JsonNode nextParameters = parameters == null ? current.parameters() : parameters;
         if (!nextParameters.isObject()) throw new IllegalArgumentException("parameters must be a JSON object");
+        validateParametersAgainstEngine(current.engineRuleId(), nextParameters);
         jdbc.update("""
                 INSERT INTO rule_definitions(rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,parameters_json,created_by)
                 VALUES (?,?,?,?,?,?,?,?,?::jsonb,?)
@@ -88,7 +90,8 @@ public class RuleManagementService {
     @Transactional
     public PublishedRuleSet publish(String actor) {
         List<ManagedRule> rules = currentRules();
-        long revision = jdbc.queryForObject("SELECT COALESCE(MAX(revision),0)+1 FROM rule_sets", Long.class);
+        Long next = jdbc.queryForObject("SELECT COALESCE(MAX(revision),0)+1 FROM rule_sets", Long.class);
+        long revision = next == null ? 1 : next;
         ObjectNode bundle = json.createObjectNode();
         bundle.put("schema_version", 2);
         bundle.put("id", "neta-production");
@@ -110,26 +113,27 @@ public class RuleManagementService {
         jdbc.update("UPDATE rule_sets SET status='SUPERSEDED' WHERE status='ACTIVE'");
         UUID id = UUID.randomUUID();
         jdbc.update("""
-                INSERT INTO rule_sets(rule_set_id,revision,version,status,bundle_json,sha256,created_by)
-                VALUES (?,?,?,'ACTIVE',?::jsonb,?,?)
-                """, id, revision, bundle.get("version").asText(), canonical, hash, actorValue(actor));
+                INSERT INTO rule_sets(rule_set_id,revision,version,status,bundle_json,bundle_text,sha256,created_by)
+                VALUES (?,?,?,'ACTIVE',?::jsonb,?,?,?)
+                """, id, revision, bundle.get("version").asText(), canonical, canonical, hash, actorValue(actor));
         jdbc.update("""
                 INSERT INTO agent_rule_state(agent_id,desired_revision,desired_sha256,status,updated_at)
-                SELECT agent_id,?,?,CASE WHEN active_sha256=? THEN 'ACTIVE' ELSE 'STALE' END,now() FROM agents
+                SELECT agent_id,?,?,CASE WHEN ?=COALESCE((SELECT active_sha256 FROM agent_rule_state ars WHERE ars.agent_id=agents.agent_id),'') THEN 'ACTIVE' ELSE 'STALE' END,now()
+                FROM agents
                 ON CONFLICT(agent_id) DO UPDATE SET desired_revision=excluded.desired_revision,
                     desired_sha256=excluded.desired_sha256,
                     status=CASE WHEN agent_rule_state.active_sha256=excluded.desired_sha256 THEN 'ACTIVE' ELSE 'STALE' END,
                     updated_at=now()
                 """, revision, hash, hash);
-        return new PublishedRuleSet(id, revision, bundle.get("version").asText(), hash, bundle, Instant.now());
+        return new PublishedRuleSet(id, revision, bundle.get("version").asText(), hash, bundle, canonical, Instant.now());
     }
 
     public PublishedRuleSet active() {
         List<PublishedRuleSet> rows = jdbc.query("""
-                SELECT rule_set_id,revision,version,sha256,bundle_json::text,published_at
+                SELECT rule_set_id,revision,version,sha256,bundle_json::text,bundle_text,published_at
                 FROM rule_sets WHERE status='ACTIVE' ORDER BY revision DESC LIMIT 1
                 """, (rs, n) -> new PublishedRuleSet(UUID.fromString(rs.getString(1)), rs.getLong(2), rs.getString(3),
-                rs.getString(4), parse(rs.getString(5)), instant(rs.getTimestamp(6))));
+                rs.getString(4), parse(rs.getString(5)), rs.getString(6), instant(rs.getTimestamp(7))));
         if (rows.isEmpty()) throw new IllegalStateException("no active rule set has been published");
         return rows.getFirst();
     }
@@ -142,6 +146,32 @@ public class RuleManagementService {
                 ON CONFLICT(agent_id) DO UPDATE SET active_revision=excluded.active_revision,
                     active_sha256=excluded.active_sha256,status=excluded.status,last_error=excluded.last_error,updated_at=now()
                 """, agentId, revision, sha256, status, error);
+    }
+
+    private void validateParametersAgainstEngine(String engineRuleId, JsonNode parameters) {
+        List<String> defaults = jdbc.query("""
+                SELECT parameters_json::text FROM rule_definitions
+                WHERE rule_id=? AND origin='DEFAULT' ORDER BY revision DESC LIMIT 1
+                """, (rs, n) -> rs.getString(1), engineRuleId);
+        if (defaults.isEmpty()) throw new IllegalArgumentException("unknown engine rule: " + engineRuleId);
+        JsonNode schema = parse(defaults.getFirst());
+        java.util.Iterator<String> expected = schema.fieldNames();
+        Set<String> expectedNames = new java.util.HashSet<>();
+        expected.forEachRemaining(expectedNames::add);
+        Set<String> suppliedNames = new java.util.HashSet<>();
+        parameters.fieldNames().forEachRemaining(suppliedNames::add);
+        if (!expectedNames.equals(suppliedNames)) {
+            throw new IllegalArgumentException("parameters for " + engineRuleId + " must contain exactly: " + expectedNames);
+        }
+        for (String field : expectedNames) {
+            JsonNode expectedValue = schema.get(field);
+            JsonNode supplied = parameters.get(field);
+            boolean compatible = (expectedValue.isNumber() && supplied.isNumber())
+                    || (expectedValue.isBoolean() && supplied.isBoolean())
+                    || (expectedValue.isTextual() && supplied.isTextual())
+                    || (expectedValue.isArray() && supplied.isArray());
+            if (!compatible) throw new IllegalArgumentException("parameter " + field + " has the wrong JSON type");
+        }
     }
 
     private ManagedRule current(String id) {
@@ -158,12 +188,6 @@ public class RuleManagementService {
     private boolean exists(String id) {
         Integer count = jdbc.queryForObject("SELECT count(*) FROM rule_definitions WHERE rule_id=?", Integer.class, id);
         return count != null && count > 0;
-    }
-
-    private String engineCategory(String engine) {
-        if (engine.startsWith("NETA-PROC-")) return "process";
-        if (engine.startsWith("NETA-TRUST-")) return "trust";
-        return "performance";
     }
 
     private JsonNode parse(String value) {
@@ -187,5 +211,6 @@ public class RuleManagementService {
     private static String actorValue(String actor) { return actor == null || actor.isBlank() ? "operator" : actor.trim(); }
     private static Instant instant(Timestamp value) { return value == null ? null : value.toInstant(); }
 
-    public record PublishedRuleSet(UUID id, long revision, String version, String sha256, JsonNode bundle, Instant publishedAt) {}
+    public record PublishedRuleSet(UUID id, long revision, String version, String sha256,
+                                   JsonNode bundle, String bundleText, Instant publishedAt) {}
 }
