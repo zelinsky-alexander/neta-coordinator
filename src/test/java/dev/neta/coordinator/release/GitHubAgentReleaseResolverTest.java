@@ -59,6 +59,21 @@ class GitHubAgentReleaseResolverTest {
     }
 
     @Test
+    void fullCommitRefSkipsGitHubCommitLookup() {
+        FakeFetcher fetcher = new FakeFetcher();
+        fetcher.put("https://api.github.com/repos/owner/repo/releases/tags/dev-" + COMMIT,
+                releaseJson("dev-" + COMMIT, true, COMMIT));
+        fetcher.put(manifestUrl("dev-" + COMMIT), manifestJson("1.4.0-dev.1", COMMIT));
+        GitHubAgentReleaseResolver resolver = resolver(fetcher);
+
+        ResolvedAgentRelease result = resolver.resolve(ReleaseSourceType.GIT_REF, COMMIT, "linux", "arm64");
+
+        assertEquals(COMMIT, result.sourceRef());
+        assertEquals(COMMIT, result.sourceCommit());
+        assertEquals(COMMIT, result.gitCommit());
+    }
+
+    @Test
     void gitRefRejectsDevelopmentManifestForDifferentCommit() {
         FakeFetcher fetcher = new FakeFetcher();
         fetcher.put("https://api.github.com/repos/owner/repo/commits/main", "{\"sha\":\"" + COMMIT + "\"}");
