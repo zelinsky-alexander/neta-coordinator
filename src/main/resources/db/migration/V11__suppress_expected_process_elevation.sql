@@ -1,5 +1,7 @@
--- MS5.2 false-positive guard. Expected privilege brokers are retained as
--- evidence/protocol messages but are not active security findings.
+-- MS5.2 false-positive guard. Expected privilege-broker transitions remain in
+-- the agent's local evidence. Older agents may still announce them, so the
+-- coordinator accepts/audits the protocol message but suppresses creation of a
+-- coordinator finding row.
 
 CREATE OR REPLACE FUNCTION neta_suppress_expected_process_elevation()
 RETURNS trigger
@@ -22,7 +24,7 @@ BEGIN
            OR lower(change.value) LIKE 'parent image: %/consent.exe'
        )
     THEN
-        NEW.status := 'SUPPRESSED';
+        RETURN NULL;
     END IF;
     RETURN NEW;
 END;
@@ -30,14 +32,14 @@ $$;
 
 DROP TRIGGER IF EXISTS findings_expected_process_elevation_guard ON findings;
 CREATE TRIGGER findings_expected_process_elevation_guard
-BEFORE INSERT OR UPDATE OF subject_type,rule_id,changes,status ON findings
+BEFORE INSERT ON findings
 FOR EACH ROW
 EXECUTE FUNCTION neta_suppress_expected_process_elevation();
 
--- Clean up already-ingested benign privilege-broker findings so deployment of
--- this migration immediately removes them from active finding/incident views.
-UPDATE findings f
-SET status='SUPPRESSED'
+-- Remove already-ingested benign broker transitions. Their signed protocol
+-- messages remain in protocol_messages/audit history and the originating agent
+-- retains the local SUPPRESSED process finding.
+DELETE FROM findings f
 WHERE upper(COALESCE(f.subject_type,''))='PROCESS'
   AND f.rule_id='PROCESS_UNEXPECTED_ELEVATION'
   AND EXISTS (
@@ -53,11 +55,6 @@ WHERE upper(COALESCE(f.subject_type,''))='PROCESS'
       )
       OR lower(change.value) LIKE 'parent image: %/consent.exe'
   );
-
-DELETE FROM incident_findings m
-USING findings f
-WHERE m.finding_id=f.finding_id
-  AND f.status='SUPPRESSED';
 
 DELETE FROM incidents i
 WHERE NOT EXISTS (
