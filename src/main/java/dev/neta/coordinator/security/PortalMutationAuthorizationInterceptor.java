@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.neta.coordinator.api.AgentAdminController;
 import dev.neta.coordinator.api.AgentUpgradeController;
 import dev.neta.coordinator.api.CertificateOperatorController;
+import dev.neta.coordinator.api.FindingDispositionController;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.LinkedHashMap;
@@ -68,6 +69,8 @@ public class PortalMutationAuthorizationInterceptor implements HandlerIntercepto
             details.put("path", request.getRequestURI());
             String agent = request.getParameter("agent");
             if (agent != null && !agent.isBlank()) details.put("requested_agent", agent);
+            String finding = request.getParameter("id");
+            if (finding != null && !finding.isBlank()) details.put("requested_finding", finding);
             jdbc.update("INSERT INTO audit_events(event_type,agent_id,details) VALUES ('PORTAL_OPERATOR_ACTION',NULL,CAST(? AS jsonb))",
                     mapper.writeValueAsString(details));
         } catch (Exception ignored) {
@@ -87,6 +90,10 @@ public class PortalMutationAuthorizationInterceptor implements HandlerIntercepto
             return new Required(PortalAuthorization.Role.ADMIN, "AGENT_REACTIVATE");
         if (bean == CertificateOperatorController.class && name.equals("rotate"))
             return new Required(PortalAuthorization.Role.ADMIN, "CERTIFICATE_ROTATE");
+        if (bean == FindingDispositionController.class && name.equals("suppress"))
+            return new Required(PortalAuthorization.Role.OPERATOR, "FINDING_SUPPRESS");
+        if (bean == FindingDispositionController.class && name.equals("falsePositive"))
+            return new Required(PortalAuthorization.Role.OPERATOR, "FINDING_FALSE_POSITIVE");
         return null;
     }
 
