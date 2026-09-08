@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-real_curl="$(command -v curl)"
-export NETA_REAL_CURL="$real_curl"
-export PATH="$script_dir/.neta-bin:$PATH"
-exec "$script_dir/neta-core" "$@"
