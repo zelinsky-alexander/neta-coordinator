@@ -9,6 +9,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.List;
+import java.util.Set;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -29,6 +30,7 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/v1")
 public class RuleManagementController {
     private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
+    private static final Set<String> AGENT_RULE_STATES = Set.of("INSTALLED", "ACTIVE", "APPLY_FAILED");
     private final RuleManagementService rules;
     private final PeerCertificateService certificates;
     private final JdbcTemplate jdbc;
@@ -114,10 +116,13 @@ public class RuleManagementController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sha256 is required");
         }
         String state = request.status() == null || request.status().isBlank() ? "ACTIVE" : request.status().trim().toUpperCase();
+        if (!AGENT_RULE_STATES.contains(state)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported agent rule state: " + state);
+        }
         PublishedRuleSet active = requireActive();
-        if ("ACTIVE".equals(state) && (request.revision() != active.revision() || !request.sha256().equalsIgnoreCase(active.sha256()))) {
+        if (request.revision() != active.revision() || !request.sha256().equalsIgnoreCase(active.sha256())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "agent acknowledged a rule set that is not the currently published revision/hash");
+                    "agent rule state does not match the currently published revision/hash");
         }
         rules.acknowledge(agentId, request.revision(), request.sha256(), state, request.error());
         return new AckResponse(true, agentId, request.revision(), request.sha256(), state);
