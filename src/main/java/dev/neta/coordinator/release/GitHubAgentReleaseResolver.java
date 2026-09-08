@@ -186,6 +186,8 @@ public class GitHubAgentReleaseResolver {
     }
 
     private String resolveCommit(String ref) {
+        String canonicalRef = canonical(ref);
+        if (canonicalRef.matches(COMMIT_PATTERN)) return canonicalRef;
         JsonNode commit = fetchJson(api("/repos/%s/%s/commits/%s".formatted(
                 segment(properties.owner()), segment(properties.repository()), segment(ref))), "Git ref " + ref);
         String sha = canonical(text(commit, "sha", true));
