@@ -46,7 +46,14 @@ public final class EnvelopeValidator {
     private static void validatePayload(MessageEnvelope e) {
         if (e.messageType() == MessageType.FINDING_ANNOUNCEMENT) {
             requirePayloadText(e, "finding_id");
-            if (!e.payload().path("target").isObject()) throw ProtocolException.badRequest("FindingAnnouncement.target is required");
+            boolean hasTarget = e.payload().path("target").isObject();
+            boolean hasSubject = e.payload().path("subject").isObject()
+                    && e.payload().path("subject").path("type").isTextual()
+                    && !e.payload().path("subject").path("type").asText().isBlank()
+                    && e.payload().path("subject").path("id").isTextual()
+                    && !e.payload().path("subject").path("id").asText().isBlank();
+            if (!hasTarget && !hasSubject)
+                throw ProtocolException.badRequest("FindingAnnouncement.target or subject is required");
             requirePayloadText(e, "evidence_root");
         } else if (e.messageType() == MessageType.CORROBORATION_RESPONSE) {
             requirePayloadText(e, "request_id");
