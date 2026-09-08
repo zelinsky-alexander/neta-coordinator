@@ -41,13 +41,13 @@ public class AgentReleaseController {
     public String releases(@RequestParam(defaultValue = "20") int limit) {
         List<ResolvedAgentRelease> rows = resolver.recent(limit);
         StringBuilder out = new StringBuilder();
-        out.append(String.format("%-9s %-24s %-12s %-16s %-18s %-12s %s%n",
+        out.append(String.format("%-9s %-40s %-12s %-16s %-18s %-12s %s%n",
                 "SOURCE", "REF", "VERSION", "BUILD", "PLATFORM", "COMMIT", "ARTIFACT"));
-        out.append("------------------------------------------------------------------------------------------------------------------------\n");
+        out.append("----------------------------------------------------------------------------------------------------------------------------------------\n");
         for (ResolvedAgentRelease row : rows) {
-            out.append(String.format("%-9s %-24s %-12s %-16s %-18s %-12s %s%n",
+            out.append(String.format("%-9s %-40s %-12s %-16s %-18s %-12s %s%n",
                     row.sourceType() == ReleaseSourceType.RELEASE ? "release" : "git-ref",
-                    trim(row.sourceRef(), 24), trim(row.version(), 12), trim(row.buildId(), 16),
+                    trim(row.sourceRef(), 40), trim(row.version(), 12), trim(row.buildId(), 16),
                     trim(row.os() + "/" + row.arch(), 18), shortCommit(row.sourceCommit()), row.artifactName()));
         }
         if (rows.isEmpty()) out.append("(no resolved releases)\n");
