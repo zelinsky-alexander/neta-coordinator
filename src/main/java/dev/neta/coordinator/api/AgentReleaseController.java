@@ -4,6 +4,8 @@ import dev.neta.coordinator.release.GitHubAgentReleaseResolver;
 import dev.neta.coordinator.release.GitHubAgentReleaseResolver.ResolutionException;
 import dev.neta.coordinator.release.ReleaseSourceType;
 import dev.neta.coordinator.release.ResolvedAgentRelease;
+import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -48,8 +50,14 @@ public class AgentReleaseController {
                 rows = rows.stream().filter(row -> wanted.equals((row.os() + "/" + row.arch()).toLowerCase())).toList();
             }
             if (latest && !rows.isEmpty()) {
-                String newestRef = rows.getFirst().sourceRef();
-                rows = rows.stream().filter(row -> newestRef.equals(row.sourceRef())).toList();
+                ResolvedAgentRelease newest = rows.stream()
+                        .max(Comparator.comparing(AgentReleaseController::publishedAtForSort)
+                                .thenComparing(ResolvedAgentRelease::buildId)
+                                .thenComparing(ResolvedAgentRelease::gitCommit))
+                        .orElseThrow();
+                rows = rows.stream()
+                        .filter(row -> samePublishedBuild(row, newest))
+                        .toList();
             }
             if (rows.size() > limit) rows = rows.subList(0, limit);
             return table(rows);
@@ -58,6 +66,15 @@ public class AgentReleaseController {
         } catch (ResolutionException e) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, e.getMessage(), e);
         }
+    }
+
+    private static Instant publishedAtForSort(ResolvedAgentRelease row) {
+        return row.publishedAt() == null ? Instant.EPOCH : row.publishedAt();
+    }
+
+    private static boolean samePublishedBuild(ResolvedAgentRelease row, ResolvedAgentRelease newest) {
+        return java.util.Objects.equals(row.buildId(), newest.buildId()) &&
+                java.util.Objects.equals(row.gitCommit(), newest.gitCommit());
     }
 
     private static String table(List<ResolvedAgentRelease> rows) {
