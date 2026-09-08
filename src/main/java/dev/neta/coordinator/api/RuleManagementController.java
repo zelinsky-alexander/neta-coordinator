@@ -10,7 +10,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -84,6 +87,21 @@ public class RuleManagementController {
     public PublishedRuleSet active() {
         try { return rules.active(); }
         catch (IllegalStateException e) { throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e); }
+    }
+
+    @GetMapping(value = "/agent/rules/bundle", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<String> bundleForAgent(HttpServletRequest request) {
+        authenticatedAgent(request);
+        PublishedRuleSet active;
+        try { active = rules.active(); }
+        catch (IllegalStateException e) { throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e); }
+        return ResponseEntity.ok()
+                .header("X-NETA-Rule-Revision", Long.toString(active.revision()))
+                .header("X-NETA-Rule-Version", active.version())
+                .header("X-NETA-Rule-SHA256", active.sha256())
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(active.bundleText());
     }
 
     @GetMapping("/agent/rules/current")
