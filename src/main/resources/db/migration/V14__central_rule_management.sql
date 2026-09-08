@@ -19,6 +19,7 @@ CREATE TABLE rule_sets (
     version             TEXT NOT NULL,
     status              TEXT NOT NULL CHECK (status IN ('PUBLISHED','ACTIVE','SUPERSEDED')),
     bundle_json         JSONB NOT NULL,
+    bundle_text         TEXT NOT NULL,
     sha256              TEXT NOT NULL,
     created_by          TEXT NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
