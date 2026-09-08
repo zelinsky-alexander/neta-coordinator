@@ -12,7 +12,7 @@ read_env_value() {
   printf '%s' "$line"
 }
 
-curl_args=(-fsS --connect-timeout 1 --max-time 10)
+curl_args=(--fail-with-body -sS --connect-timeout 1 --max-time 10)
 if [[ -n "${NETA_OPERATOR_CA:-}" ]]; then curl_args+=(--cacert "$NETA_OPERATOR_CA")
 elif [[ -f deploy/certs/fleet-ca.crt ]]; then curl_args+=(--cacert deploy/certs/fleet-ca.crt); fi
 [[ -n "${NETA_OPERATOR_CERT:-}" ]] && curl_args+=(--cert "$NETA_OPERATOR_CERT")
