@@ -38,10 +38,15 @@ public class AgentReleaseController {
     @GetMapping(value = "/releases", produces = MediaType.TEXT_PLAIN_VALUE)
     public String releases(@RequestParam(defaultValue = "20") int limit,
                            @RequestParam(required = false) String platform,
-                           @RequestParam(defaultValue = "false") boolean latest) {
+                           @RequestParam(defaultValue = "false") boolean latest,
+                           @RequestParam(defaultValue = "false") boolean cached) {
         if (limit < 1 || limit > 100) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be 1..100");
         try {
-            List<ResolvedAgentRelease> rows = resolver.livePublished(100, platform);
+            List<ResolvedAgentRelease> rows = cached ? resolver.recent(100) : resolver.livePublished(100, platform);
+            if (cached && platform != null && !platform.isBlank()) {
+                String wanted = platform.trim().toLowerCase();
+                rows = rows.stream().filter(row -> wanted.equals((row.os() + "/" + row.arch()).toLowerCase())).toList();
+            }
             if (latest && !rows.isEmpty()) {
                 String newestRef = rows.getFirst().sourceRef();
                 rows = rows.stream().filter(row -> newestRef.equals(row.sourceRef())).toList();
