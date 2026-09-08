@@ -96,33 +96,39 @@ public class FindingInvestigationController {
         rowArgs.add(boundedOffset);
         List<Row> rows = jdbc.query("""
                 SELECT f.finding_id,f.agent_id,a.display_name,f.target_host,f.target_port,
+                       f.subject_type,f.subject_id,f.severity,f.rule_id,
                        f.trust_verdict,f.performance_verdict,f.occurrence_count,f.status,
                        f.first_seen,f.last_seen,m.incident_id,f.changes::text AS changes
                 """ + from + where + " ORDER BY " + sortColumn + " " + direction + ", f.finding_id LIMIT ? OFFSET ?",
                 (rs, n) -> new Row(rs.getString("finding_id"), rs.getString("agent_id"), rs.getString("display_name"),
-                        rs.getString("target_host"), rs.getInt("target_port"), rs.getString("trust_verdict"),
-                        rs.getString("performance_verdict"), rs.getLong("occurrence_count"), rs.getString("status"),
-                        instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")), rs.getString("incident_id"),
-                        rs.getString("changes")),
+                        rs.getString("target_host"), rs.getObject("target_port", Integer.class),
+                        rs.getString("subject_type"), rs.getString("subject_id"), rs.getString("severity"), rs.getString("rule_id"),
+                        rs.getString("trust_verdict"), rs.getString("performance_verdict"), rs.getLong("occurrence_count"),
+                        rs.getString("status"), instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")),
+                        rs.getString("incident_id"), rs.getString("changes")),
                 rowArgs.toArray());
 
         StringBuilder out = new StringBuilder();
         out.append("Findings matched: ").append(matched == null ? 0 : matched)
                 .append("  showing: ").append(rows.size())
                 .append("  offset: ").append(boundedOffset).append("\n\n");
-        out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5s %-8s %-20s %s%n",
-                "LAST SEEN","AGENT","TARGET","TYPE","SEVERITY","CONFIDENCE","ASSESSMENT","COUNT","STATUS","INCIDENT","FINDING"));
-        out.append("-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
+        out.append(String.format("%-10s %-20s %-27s %-32s %-9s %-10s %-20s %5s %-8s %-20s %s%n",
+                "LAST SEEN","AGENT","SUBJECT","TYPE","SEVERITY","CONFIDENCE","ASSESSMENT","COUNT","STATUS","INCIDENT","FINDING"));
+        out.append("---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
         Instant now = Instant.now();
         for (Row r : rows) {
-            String findingType = findingAttribute(r.changes(), "Finding type:", fallbackFindingType(r.findingId()));
-            String severity = findingAttribute(r.changes(), "Severity:", "-");
+            boolean process = "PROCESS".equalsIgnoreCase(r.subjectType());
+            String findingType = process && text(r.ruleId())
+                    ? r.ruleId()
+                    : findingAttribute(r.changes(), "Finding type:", fallbackFindingType(r.findingId()));
+            String severity = text(r.severity()) ? r.severity() : findingAttribute(r.changes(), "Severity:", "-");
             String confidence = formatConfidence(findingAttribute(r.changes(), "Confidence:", "-"));
             String intent = findingAttribute(r.changes(), "Malicious intent:", "UNKNOWN");
-            String assessment = assessment(findingType, r.trust(), intent);
-            out.append(String.format("%-10s %-20s %-27s %-28s %-9s %-10s %-20s %5d %-8s %-20s %s%n",
+            String assessment = process ? "BEHAVIORAL_PATTERN" : assessment(findingType, r.trust(), intent);
+            String subject = process ? processSubjectDisplay(r.changes(), r.subjectId()) : networkSubject(r.host(), r.port());
+            out.append(String.format("%-10s %-20s %-27s %-32s %-9s %-10s %-20s %5d %-8s %-20s %s%n",
                     age(r.lastSeen(), now), trim(display(r.displayName(), r.agentId()),20),
-                    trim(r.host()+":"+r.port(),27), trim(value(findingType),28), value(severity), confidence,
+                    trim(subject,27), trim(value(findingType),32), value(severity), confidence,
                     trim(assessment,20), r.count(), value(r.status()), r.incidentId()==null?"-":r.incidentId(), r.findingId()));
         }
         return out.toString();
@@ -144,7 +150,8 @@ public class FindingInvestigationController {
                 """, (rs,n) -> new CountRow(rs.getString("label"),rs.getLong("n")));
         List<CountRow> targets = jdbc.query("""
                 SELECT target_host || ':' || target_port AS label, count(*) n
-                FROM findings GROUP BY target_host,target_port ORDER BY n DESC,label LIMIT 5
+                FROM findings WHERE target_host IS NOT NULL
+                GROUP BY target_host,target_port ORDER BY n DESC,label LIMIT 5
                 """, (rs,n) -> new CountRow(rs.getString("label"),rs.getLong("n")));
         List<CountRow> agents = jdbc.query("""
                 SELECT COALESCE(NULLIF(a.display_name,''),f.agent_id) label, count(*) n
@@ -157,7 +164,7 @@ public class FindingInvestigationController {
         metric(out,"Total",agg.total()); metric(out,"Active",agg.active());
         out.append("\nTrust\n"); metric(out,"Stable",agg.stable()); metric(out,"Changed",agg.changed()); metric(out,"Suspicious",agg.suspicious());
         out.append("\nPerformance\n"); for (CountRow r: performance) metric(out,r.label(),r.count());
-        out.append("\nTop targets\n"); for (CountRow r: targets) metric(out,r.label(),r.count());
+        out.append("\nTop network targets\n"); for (CountRow r: targets) metric(out,r.label(),r.count());
         out.append("\nMost active endpoints\n"); for (CountRow r: agents) metric(out,r.label(),r.count());
         return out.toString();
     }
@@ -166,14 +173,16 @@ public class FindingInvestigationController {
     public String detail(@RequestParam("id") String id) {
         List<Detail> rows = jdbc.query("""
                 SELECT f.finding_id,f.finding_key,f.message_id,f.agent_id,a.display_name,
-                       f.target_host,f.target_port,f.performance_verdict,f.trust_verdict,f.status,
+                       f.target_host,f.target_port,f.subject_type,f.subject_id,f.severity,f.rule_id,
+                       f.performance_verdict,f.trust_verdict,f.status,
                        f.occurrence_count,f.first_seen,f.last_seen,f.observed_from,f.observed_to,
                        f.evidence_root,f.changes::text,f.rule_set::text,f.payload::text,m.incident_id
                 FROM findings f JOIN agents a ON a.agent_id=f.agent_id
                 LEFT JOIN incident_findings m ON m.finding_id=f.finding_id
                 WHERE f.finding_id=?
                 """, (rs,n) -> new Detail(rs.getString("finding_id"),rs.getString("finding_key"),rs.getString("message_id"),
-                        rs.getString("agent_id"),rs.getString("display_name"),rs.getString("target_host"),rs.getInt("target_port"),
+                        rs.getString("agent_id"),rs.getString("display_name"),rs.getString("target_host"),rs.getObject("target_port", Integer.class),
+                        rs.getString("subject_type"),rs.getString("subject_id"),rs.getString("severity"),rs.getString("rule_id"),
                         rs.getString("performance_verdict"),rs.getString("trust_verdict"),rs.getString("status"),rs.getLong("occurrence_count"),
                         instant(rs.getTimestamp("first_seen")),instant(rs.getTimestamp("last_seen")),instant(rs.getTimestamp("observed_from")),
                         instant(rs.getTimestamp("observed_to")),rs.getString("evidence_root"),rs.getString("changes"),rs.getString("rule_set"),
@@ -181,17 +190,33 @@ public class FindingInvestigationController {
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"finding not found");
         Detail r = rows.getFirst();
         Instant now = Instant.now();
+        boolean process = "PROCESS".equalsIgnoreCase(r.subjectType());
+        String subject = process ? processSubjectDisplay(r.changes(), r.subjectId()) : networkSubject(r.host(), r.port());
+        String findingType = process && text(r.ruleId()) ? r.ruleId() : fallbackFindingType(r.findingId());
         StringBuilder out = new StringBuilder();
         out.append(r.findingId()).append("\n\n");
         line(out,"Agent",display(r.displayName(),r.agentId())+" ("+r.agentId()+")");
         line(out,"Incident",r.incidentId()==null?"-":r.incidentId());
-        line(out,"Target",r.host()+":"+r.port());
+        line(out,"Subject",subject);
+        if (process) {
+            line(out,"Subject type",value(r.subjectType()));
+            line(out,"Subject ID",raw(r.subjectId()));
+            line(out,"Rule ID",raw(r.ruleId()));
+            line(out,"Severity",value(r.severity()));
+            line(out,"Assessment","BEHAVIORAL_PATTERN");
+        }
+        line(out,"Type",value(findingType));
         line(out,"State",value(r.status()));
         line(out,"Occurrences",Long.toString(r.count()));
         line(out,"First seen",age(r.firstSeen(),now)+" ("+r.firstSeen()+")");
         line(out,"Last seen",age(r.lastSeen(),now)+" ("+r.lastSeen()+")");
         out.append("\nAssessment\n----------\n");
-        line(out,"Trust",value(r.trust())); line(out,"Performance",value(r.performance()));
+        if (!process) {
+            line(out,"Trust",value(r.trust()));
+            line(out,"Performance",value(r.performance()));
+        } else {
+            line(out,"Interpretation",findingAttribute(r.changes(),"Interpretation:","Behavioral pattern observed; malicious intent is not established."));
+        }
         out.append("\nObserved changes\n----------------\n").append(pretty(r.changes())).append('\n');
         out.append("\nEvidence\n--------\n");
         line(out,"Evidence root",raw(r.evidenceRoot())); line(out,"Finding key",raw(r.findingKey())); line(out,"Message ID",raw(r.messageId()));
@@ -219,6 +244,22 @@ public class FindingInvestigationController {
             }
         } catch (Exception ignored) { }
         return fallback;
+    }
+
+    private String processSubjectDisplay(String changes,String subjectId) {
+        String image=findingAttribute(changes,"Process image:","");
+        if(text(image)) {
+            String normalized=image.replace('\\','/');
+            int slash=normalized.lastIndexOf('/');
+            String leaf=slash>=0?normalized.substring(slash+1):normalized;
+            if(text(leaf)) return leaf;
+        }
+        return text(subjectId)?subjectId:"process";
+    }
+
+    private static String networkSubject(String host,Integer port) {
+        if(!text(host)) return "-";
+        return port==null?host:host+":"+port;
     }
 
     private static String fallbackFindingType(String findingId) {
@@ -278,8 +319,8 @@ public class FindingInvestigationController {
     private static String age(Instant then,Instant now){ if(then==null)return "never"; long sec=Math.max(0,Duration.between(then,now).getSeconds()); if(sec<60)return sec+" sec"; long min=sec/60; if(min<60)return min+" min"; long h=min/60; if(h<48)return h+" hr"; return h/24+" day"; }
 
     private record Target(String host,Integer port){}
-    private record Row(String findingId,String agentId,String displayName,String host,int port,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId,String changes){}
-    private record Detail(String findingId,String findingKey,String messageId,String agentId,String displayName,String host,int port,String performance,String trust,String status,long count,Instant firstSeen,Instant lastSeen,Instant observedFrom,Instant observedTo,String evidenceRoot,String changes,String ruleSet,String payload,String incidentId){}
+    private record Row(String findingId,String agentId,String displayName,String host,Integer port,String subjectType,String subjectId,String severity,String ruleId,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId,String changes){}
+    private record Detail(String findingId,String findingKey,String messageId,String agentId,String displayName,String host,Integer port,String subjectType,String subjectId,String severity,String ruleId,String performance,String trust,String status,long count,Instant firstSeen,Instant lastSeen,Instant observedFrom,Instant observedTo,String evidenceRoot,String changes,String ruleSet,String payload,String incidentId){}
     private record Aggregate(long total,long active,long stable,long changed,long suspicious){}
     private record CountRow(String label,long count){}
 }
