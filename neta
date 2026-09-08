@@ -69,7 +69,7 @@ Usage:
   ./neta agent upgrade <agent-id-or-name> --show-ref
   ./neta upgrades [agent-id-or-name]
   ./neta upgrade <upgrade-id>
-  ./neta releases [limit]
+  ./neta releases [limit] [--platform OS/ARCH] [--latest]
   ./neta release resolve --source release|git-ref --ref REF --os OS --arch ARCH
   ./neta certificates [--expiring 30d]
   ./neta certificate <agent-id-or-name>
@@ -129,7 +129,9 @@ case "$command" in
   upgrade)
     upgrade_id="${2:-}"; require_arg "$upgrade_id" "usage: ./neta upgrade <upgrade-id>"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "id=$upgrade_id" "$base_url/api/v1/operator/upgrade" ;;
   releases)
-    limit="${2:-20}"; validate_limit "$limit" "release"; base_url="$(resolve_base_url)"; exec curl "${curl_args[@]}" --get --data-urlencode "limit=$limit" "$base_url/api/v1/operator/releases" ;;
+    shift; limit="20"; platform=""; latest="false"; if (($#)) && [[ "$1" =~ ^[0-9]+$ ]]; then limit="$1"; shift; fi
+    while (($#)); do case "$1" in --platform) require_arg "${2:-}" "--platform requires OS/ARCH"; platform="$2"; shift 2;; --latest) latest="true"; shift;; *) echo "unknown releases option: $1" >&2; exit 2;; esac; done
+    validate_limit "$limit" "release"; base_url="$(resolve_base_url)"; args=("${curl_args[@]}" --get --data-urlencode "limit=$limit"); [[ -n "$platform" ]] && args+=(--data-urlencode "platform=$platform"); [[ "$latest" == "true" ]] && args+=(--data-urlencode "latest=true"); exec curl "${args[@]}" "$base_url/api/v1/operator/releases" ;;
   release)
     action="${2:-}"; [[ "$action" == "resolve" ]] || { echo "usage: ./neta release resolve --source release|git-ref --ref REF --os OS --arch ARCH" >&2; exit 2; }; shift 2
     source="release"; ref=""; os=""; arch=""
