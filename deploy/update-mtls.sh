@@ -23,9 +23,9 @@ compose=(docker compose --env-file .env -f docker-compose.yml -f docker-compose.
 # contain the mTLS override. This also catches accidental edits or invocation from
 # a checkout where the override is not being applied.
 resolved_config="$("${compose[@]}" config)"
-printf '%s\n' "$resolved_config" | grep -Eq 'SPRING_PROFILES_ACTIVE:[[:space:]]+["'"']?mtls["'"']?$' \
+printf '%s\n' "$resolved_config" | grep -Eq "SPRING_PROFILES_ACTIVE:[[:space:]]+['\"]?mtls['\"]?$" \
   || fail "effective Compose configuration does not set SPRING_PROFILES_ACTIVE=mtls"
-printf '%s\n' "$resolved_config" | grep -Eq 'NETA_REQUIRE_CLIENT_CERTIFICATE:[[:space:]]+["'"']?true["'"']?$' \
+printf '%s\n' "$resolved_config" | grep -Eq "NETA_REQUIRE_CLIENT_CERTIFICATE:[[:space:]]+['\"]?true['\"]?$" \
   || fail "effective Compose configuration does not set NETA_REQUIRE_CLIENT_CERTIFICATE=true"
 printf '%s\n' "$resolved_config" | grep -q 'NETA_TLS_KEY_STORE:' \
   || fail "effective Compose configuration does not contain NETA_TLS_KEY_STORE"
