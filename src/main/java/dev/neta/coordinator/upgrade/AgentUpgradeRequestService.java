@@ -36,7 +36,8 @@ public class AgentUpgradeRequestService {
         }
 
         List<TargetAgent> rows = jdbc.query("""
-                SELECT agent_id, display_name, status, agent_os, agent_arch
+                SELECT agent_id, display_name, status, agent_os, agent_arch,
+                       agent_version, agent_build_id, agent_git_commit, agent_artifact_sha256
                 FROM agents
                 WHERE agent_id=? OR display_name=?
                 ORDER BY CASE WHEN agent_id=? THEN 0 ELSE 1 END
@@ -46,7 +47,11 @@ public class AgentUpgradeRequestService {
                 rs.getString("display_name"),
                 rs.getString("status"),
                 rs.getString("agent_os"),
-                rs.getString("agent_arch")),
+                rs.getString("agent_arch"),
+                rs.getString("agent_version"),
+                rs.getString("agent_build_id"),
+                rs.getString("agent_git_commit"),
+                rs.getString("agent_artifact_sha256")),
                 agentRef, agentRef, agentRef);
         if (rows.isEmpty()) throw new AgentUpgradeService.UpgradeRequestException("agent not found: " + agentRef);
 
@@ -60,8 +65,23 @@ public class AgentUpgradeRequestService {
         }
 
         ResolvedAgentRelease target = releases.resolve(sourceType, sourceRef, agent.os(), agent.arch());
+        if (sameBuild(agent, target)) {
+            throw new AgentUpgradeService.UpgradeRequestException(
+                    "agent already runs requested build " + target.buildId() + " (" + target.gitCommit() + "); nothing to upgrade");
+        }
         return upgrades.createRequest(agent.agentId(), target);
     }
 
-    private record TargetAgent(String agentId, String displayName, String status, String os, String arch) {}
+    private static boolean sameBuild(TargetAgent agent, ResolvedAgentRelease target) {
+        return equal(agent.version(), target.version())
+                && equal(agent.buildId(), target.buildId())
+                && equal(agent.gitCommit(), target.gitCommit());
+    }
+
+    private static boolean equal(String left, String right) {
+        return left != null && right != null && left.trim().equalsIgnoreCase(right.trim());
+    }
+
+    private record TargetAgent(String agentId, String displayName, String status, String os, String arch,
+                               String version, String buildId, String gitCommit, String artifactSha256) {}
 }
