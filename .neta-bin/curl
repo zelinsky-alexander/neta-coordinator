@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-real_curl="${NETA_REAL_CURL:-}"
-[[ -n "$real_curl" ]] || { echo "NETA_REAL_CURL is not set" >&2; exit 127; }
-args=()
-for arg in "$@"; do
-  if [[ "$arg" == "-fsS" ]]; then args+=(--fail-with-body -sS); else args+=("$arg"); fi
-done
-exec "$real_curl" "${args[@]}"
