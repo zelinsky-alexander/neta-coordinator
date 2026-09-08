@@ -85,31 +85,25 @@ public class RuleManagementController {
 
     @GetMapping("/rule-sets/active")
     public PublishedRuleSet active() {
-        try { return rules.active(); }
-        catch (IllegalStateException e) { throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e); }
+        return requireActive();
     }
 
     @GetMapping(value = "/agent/rules/bundle", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> bundleForAgent(HttpServletRequest request) {
         authenticatedAgent(request);
-        PublishedRuleSet active;
-        try { active = rules.active(); }
-        catch (IllegalStateException e) { throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e); }
-        return ResponseEntity.ok()
-                .header("X-NETA-Rule-Revision", Long.toString(active.revision()))
-                .header("X-NETA-Rule-Version", active.version())
-                .header("X-NETA-Rule-SHA256", active.sha256())
-                .header(HttpHeaders.CACHE_CONTROL, "no-store")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(active.bundleText());
+        return bundleResponse(requireActive());
+    }
+
+    @PostMapping(value = "/agent/rules/fetch", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<String> fetchForAgent(HttpServletRequest request) {
+        authenticatedAgent(request);
+        return bundleResponse(requireActive());
     }
 
     @GetMapping("/agent/rules/current")
     public AgentRuleBundle currentForAgent(HttpServletRequest request) {
         String agentId = authenticatedAgent(request);
-        PublishedRuleSet active;
-        try { active = rules.active(); }
-        catch (IllegalStateException e) { throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e); }
+        PublishedRuleSet active = requireActive();
         return new AgentRuleBundle(agentId, active.revision(), active.version(), active.sha256(), active.bundle());
     }
 
@@ -120,8 +114,28 @@ public class RuleManagementController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sha256 is required");
         }
         String state = request.status() == null || request.status().isBlank() ? "ACTIVE" : request.status().trim().toUpperCase();
+        PublishedRuleSet active = requireActive();
+        if ("ACTIVE".equals(state) && (request.revision() != active.revision() || !request.sha256().equalsIgnoreCase(active.sha256()))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "agent acknowledged a rule set that is not the currently published revision/hash");
+        }
         rules.acknowledge(agentId, request.revision(), request.sha256(), state, request.error());
         return new AckResponse(true, agentId, request.revision(), request.sha256(), state);
+    }
+
+    private ResponseEntity<String> bundleResponse(PublishedRuleSet active) {
+        return ResponseEntity.ok()
+                .header("X-NETA-Rule-Revision", Long.toString(active.revision()))
+                .header("X-NETA-Rule-Version", active.version())
+                .header("X-NETA-Rule-SHA256", active.sha256())
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(active.bundleText());
+    }
+
+    private PublishedRuleSet requireActive() {
+        try { return rules.active(); }
+        catch (IllegalStateException e) { throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e); }
     }
 
     private String authenticatedAgent(HttpServletRequest request) {
@@ -132,7 +146,8 @@ public class RuleManagementController {
                 WHERE certificate_sha256=? AND status='ACTIVE'
                 LIMIT 2
                 """, (rs, n) -> rs.getString(1), fingerprint);
-        if (agents.size() != 1) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "agent certificate is not bound to one active endpoint");
+        if (agents.size() != 1) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,
+                "agent certificate is not bound to one active endpoint");
         return agents.getFirst();
     }
 
@@ -146,7 +161,8 @@ public class RuleManagementController {
                 "rule administration is disabled; configure NETA_OPERATOR_ADMIN_TOKEN");
         byte[] expected = adminToken.getBytes(StandardCharsets.UTF_8);
         byte[] supplied = (suppliedToken == null ? "" : suppliedToken).getBytes(StandardCharsets.UTF_8);
-        if (!MessageDigest.isEqual(expected, supplied)) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid operator admin token");
+        if (!MessageDigest.isEqual(expected, supplied)) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,
+                "invalid operator admin token");
     }
 
     private static RuleSetSummary summary(PublishedRuleSet set) {
