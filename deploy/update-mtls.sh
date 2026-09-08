@@ -19,8 +19,24 @@ done
 
 compose=(docker compose --env-file .env -f docker-compose.yml -f docker-compose.mtls.yml)
 
+# Fail before touching the running service if the effective Compose model does not
+# contain the mTLS override. This also catches accidental edits or invocation from
+# a checkout where the override is not being applied.
+resolved_config="$("${compose[@]}" config)"
+printf '%s\n' "$resolved_config" | grep -Eq 'SPRING_PROFILES_ACTIVE:[[:space:]]+["'"']?mtls["'"']?$' \
+  || fail "effective Compose configuration does not set SPRING_PROFILES_ACTIVE=mtls"
+printf '%s\n' "$resolved_config" | grep -Eq 'NETA_REQUIRE_CLIENT_CERTIFICATE:[[:space:]]+["'"']?true["'"']?$' \
+  || fail "effective Compose configuration does not set NETA_REQUIRE_CLIENT_CERTIFICATE=true"
+printf '%s\n' "$resolved_config" | grep -q 'NETA_TLS_KEY_STORE:' \
+  || fail "effective Compose configuration does not contain NETA_TLS_KEY_STORE"
+printf '%s\n' "$resolved_config" | grep -q 'NETA_TLS_TRUST_STORE:' \
+  || fail "effective Compose configuration does not contain NETA_TLS_TRUST_STORE"
+
 info "Updating NETA Coordinator in mTLS mode..."
-"${compose[@]}" up -d --build coordinator
+# A coordinator may have previously been created from docker-compose.yml alone.
+# Force recreation so an existing base-mode container cannot simply be restarted
+# with stale environment/volume/healthcheck configuration. Keep PostgreSQL intact.
+"${compose[@]}" up -d --build --force-recreate --no-deps coordinator
 
 info "Waiting for coordinator container health..."
 for _ in {1..30}; do
