@@ -13,6 +13,7 @@ public record ManagedRule(
         String severity,
         boolean enabled,
         JsonNode parameters,
+        JsonNode exclude,
         String createdBy,
         Instant createdAt) {
 }
