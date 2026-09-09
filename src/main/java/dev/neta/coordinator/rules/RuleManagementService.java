@@ -22,7 +22,6 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class RuleManagementService {
     private static final Set<String> CUSTOM_ENGINES = Set.of(
-            "NETA-PERF-001", "NETA-TRUST-001", "NETA-TRUST-002",
             "NETA-PROC-001", "NETA-PROC-002", "NETA-PROC-003", "NETA-PROC-004", "NETA-PROC-005",
             "NETA-BEH-001", "NETA-NET-001", "NETA-NET-002", "NETA-NET-003", "NETA-NET-004",
             "NETA-DNS-001", "NETA-DNS-002", "NETA-DNS-003",
@@ -54,7 +53,8 @@ public class RuleManagementService {
                                     boolean enabled, JsonNode parameters, String actor) {
         String engine = required(engineRuleId, "engineRuleId").toUpperCase(Locale.ROOT);
         if (!CUSTOM_ENGINES.contains(engine)) {
-            throw new IllegalArgumentException("unsupported trusted engine for custom rule: " + engine);
+            throw new IllegalArgumentException(
+                    "custom rules require a multi-instance process, behavior, network, DNS, TLS, or route engine");
         }
         String id = requestedId == null || requestedId.isBlank()
                 ? "CUS-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT)
