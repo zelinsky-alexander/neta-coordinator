@@ -26,6 +26,10 @@ public class RuleManagementService {
             "NETA-BEH-001", "NETA-NET-001", "NETA-NET-002", "NETA-NET-003", "NETA-NET-004",
             "NETA-DNS-001", "NETA-DNS-002", "NETA-DNS-003",
             "NETA-TLS-001", "NETA-TLS-002", "NETA-ROUTE-001");
+    private static final Set<String> EXCLUSION_FIELDS = Set.of(
+            "process_names", "executable_paths", "process_path_prefixes", "parent_process_names", "users",
+            "remote_hosts", "remote_ips", "remote_ports", "local_ports", "domains", "directions");
+    private static final Set<String> DIRECTIONS = Set.of("inbound", "outbound", "unknown");
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
@@ -39,18 +43,18 @@ public class RuleManagementService {
         return jdbc.query("""
                 SELECT DISTINCT ON (rule_id)
                        rule_id, revision, origin, engine_rule_id, name, category, severity, enabled,
-                       parameters_json::text, created_by, created_at
+                       parameters_json::text, exclusions_json::text, created_by, created_at
                 FROM rule_definitions
                 ORDER BY rule_id, revision DESC
                 """, (rs, n) -> new ManagedRule(
                 rs.getString(1), rs.getLong(2), rs.getString(3), rs.getString(4), rs.getString(5),
-                rs.getString(6), rs.getString(7), rs.getBoolean(8), parse(rs.getString(9)),
-                rs.getString(10), instant(rs.getTimestamp(11))));
+                rs.getString(6), rs.getString(7), rs.getBoolean(8), parse(rs.getString(9)), parse(rs.getString(10)),
+                rs.getString(11), instant(rs.getTimestamp(12))));
     }
 
     @Transactional
     public ManagedRule createCustom(String requestedId, String engineRuleId, String name, String severity,
-                                    boolean enabled, JsonNode parameters, String actor) {
+                                    boolean enabled, JsonNode parameters, JsonNode exclude, String actor) {
         String engine = required(engineRuleId, "engineRuleId").toUpperCase(Locale.ROOT);
         if (!CUSTOM_ENGINES.contains(engine)) {
             throw new IllegalArgumentException(
@@ -68,16 +72,19 @@ public class RuleManagementService {
         JsonNode params = parameters == null ? json.createObjectNode() : parameters;
         if (!params.isObject()) throw new IllegalArgumentException("parameters must be a JSON object");
         validateParametersAgainstEngine(engine, params);
+        JsonNode exclusions = validateExclusions(exclude);
         jdbc.update("""
-                INSERT INTO rule_definitions(rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,parameters_json,created_by)
-                VALUES (?,1,'CUSTOM',?,?,?,?,?,?::jsonb,?)
+                INSERT INTO rule_definitions(rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,
+                                             parameters_json,exclusions_json,created_by)
+                VALUES (?,1,'CUSTOM',?,?,?,?,?,?::jsonb,?::jsonb,?)
                 """, id, engine, required(name, "name"), engineCategory(engine), normalizedSeverity,
-                enabled, write(params), actorValue(actor));
+                enabled, write(params), write(exclusions), actorValue(actor));
         return current(id);
     }
 
     @Transactional
-    public ManagedRule revise(String id, String name, String severity, Boolean enabled, JsonNode parameters, String actor) {
+    public ManagedRule revise(String id, String name, String severity, Boolean enabled, JsonNode parameters,
+                              JsonNode exclude, String actor) {
         ManagedRule current = current(id);
         long revision = current.revision() + 1;
         String nextName = name == null || name.isBlank() ? current.name() : name.trim();
@@ -87,11 +94,13 @@ public class RuleManagementService {
         JsonNode nextParameters = parameters == null ? current.parameters() : parameters;
         if (!nextParameters.isObject()) throw new IllegalArgumentException("parameters must be a JSON object");
         validateParametersAgainstEngine(current.engineRuleId(), nextParameters);
+        JsonNode nextExclusions = exclude == null ? current.exclude() : validateExclusions(exclude);
         jdbc.update("""
-                INSERT INTO rule_definitions(rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,parameters_json,created_by)
-                VALUES (?,?,?,?,?,?,?,?,?::jsonb,?)
+                INSERT INTO rule_definitions(rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,
+                                             parameters_json,exclusions_json,created_by)
+                VALUES (?,?,?,?,?,?,?,?,?::jsonb,?::jsonb,?)
                 """, current.id(), revision, current.origin(), current.engineRuleId(), nextName, current.category(), nextSeverity,
-                enabled == null ? current.enabled() : enabled, write(nextParameters), actorValue(actor));
+                enabled == null ? current.enabled() : enabled, write(nextParameters), write(nextExclusions), actorValue(actor));
         return current(id);
     }
 
@@ -115,6 +124,7 @@ public class RuleManagementService {
             item.put("severity", rule.severity());
             item.put("enabled", rule.enabled());
             item.set("parameters", rule.parameters());
+            item.set("exclude", rule.exclude());
         }
         String canonical = write(bundle);
         String hash = sha256(canonical);
@@ -172,14 +182,12 @@ public class RuleManagementService {
                 """, (rs, n) -> rs.getString(1), engineRuleId);
         if (defaults.isEmpty()) throw new IllegalArgumentException("unknown engine rule: " + engineRuleId);
         JsonNode schema = parse(defaults.getFirst());
-        java.util.Iterator<String> expected = schema.fieldNames();
         Set<String> expectedNames = new java.util.HashSet<>();
-        expected.forEachRemaining(expectedNames::add);
+        schema.fieldNames().forEachRemaining(expectedNames::add);
         Set<String> suppliedNames = new java.util.HashSet<>();
         parameters.fieldNames().forEachRemaining(suppliedNames::add);
-        if (!expectedNames.equals(suppliedNames)) {
+        if (!expectedNames.equals(suppliedNames))
             throw new IllegalArgumentException("parameters for " + engineRuleId + " must contain exactly: " + expectedNames);
-        }
         for (String field : expectedNames) {
             JsonNode expectedValue = schema.get(field);
             JsonNode supplied = parameters.get(field);
@@ -188,21 +196,38 @@ public class RuleManagementService {
                     || (expectedValue.isTextual() && supplied.isTextual())
                     || (expectedValue.isArray() && supplied.isArray());
             if (!compatible) throw new IllegalArgumentException("parameter " + field + " has the wrong JSON type");
-            if (expectedValue.isArray()) {
-                for (JsonNode item : supplied) {
-                    if (!item.isTextual()) throw new IllegalArgumentException("array parameter " + field + " must contain strings");
-                }
+            if (expectedValue.isArray()) for (JsonNode item : supplied)
+                if (!item.isTextual()) throw new IllegalArgumentException("array parameter " + field + " must contain strings");
+        }
+    }
+
+    private JsonNode validateExclusions(JsonNode candidate) {
+        JsonNode exclusions = candidate == null ? json.createObjectNode() : candidate;
+        if (!exclusions.isObject()) throw new IllegalArgumentException("exclude must be a JSON object");
+        java.util.Iterator<String> fields = exclusions.fieldNames();
+        while (fields.hasNext()) {
+            String field = fields.next();
+            if (!EXCLUSION_FIELDS.contains(field)) throw new IllegalArgumentException("unsupported exclusion field: " + field);
+            JsonNode values = exclusions.get(field);
+            if (!values.isArray()) throw new IllegalArgumentException("exclude." + field + " must be an array of strings");
+            for (JsonNode item : values) {
+                if (!item.isTextual() || item.asText().isBlank())
+                    throw new IllegalArgumentException("exclude." + field + " must contain non-empty strings");
+                if (field.equals("directions") && !DIRECTIONS.contains(item.asText().toLowerCase(Locale.ROOT)))
+                    throw new IllegalArgumentException("exclude.directions accepts inbound, outbound, or unknown");
             }
         }
+        return exclusions.deepCopy();
     }
 
     private ManagedRule current(String id) {
         List<ManagedRule> rows = jdbc.query("""
-                SELECT rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,parameters_json::text,created_by,created_at
+                SELECT rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,
+                       parameters_json::text,exclusions_json::text,created_by,created_at
                 FROM rule_definitions WHERE rule_id=? ORDER BY revision DESC LIMIT 1
                 """, (rs, n) -> new ManagedRule(rs.getString(1), rs.getLong(2), rs.getString(3), rs.getString(4),
                 rs.getString(5), rs.getString(6), rs.getString(7), rs.getBoolean(8), parse(rs.getString(9)),
-                rs.getString(10), instant(rs.getTimestamp(11))), id);
+                parse(rs.getString(10)), rs.getString(11), instant(rs.getTimestamp(12))), id);
         if (rows.isEmpty()) throw new IllegalArgumentException("rule not found: " + id);
         return rows.getFirst();
     }
