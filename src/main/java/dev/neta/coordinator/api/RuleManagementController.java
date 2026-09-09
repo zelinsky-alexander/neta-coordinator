@@ -3,7 +3,9 @@ package dev.neta.coordinator.api;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.neta.coordinator.rules.ManagedRule;
 import dev.neta.coordinator.rules.RuleManagementService;
+import dev.neta.coordinator.rules.RuleManagementService.EffectiveRuleSet;
 import dev.neta.coordinator.rules.RuleManagementService.PublishedRuleSet;
+import dev.neta.coordinator.rules.RuleManagementService.RuleOverride;
 import dev.neta.coordinator.security.PeerCertificateService;
 import jakarta.servlet.http.HttpServletRequest;
 import java.nio.charset.StandardCharsets;
@@ -52,6 +54,34 @@ public class RuleManagementController {
         return new RuleCatalogResponse(rules.currentRules(), active == null ? null : summary(active));
     }
 
+    @GetMapping("/operator/rule-overrides")
+    public List<RuleOverride> listOverrides(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken) {
+        requireAdmin(suppliedToken);
+        return rules.ruleOverrides();
+    }
+
+    @PostMapping("/operator/rule-overrides/{id}/approve")
+    public RuleOverride approveOverride(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                                        @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
+                                        @PathVariable long id) {
+        requireAdmin(suppliedToken);
+        try { return rules.approveEndpointOverride(id, actor); }
+        catch (IllegalArgumentException | IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
+    }
+
+    @PostMapping("/operator/rule-overrides/{id}/retire")
+    public RuleOverride retireOverride(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                                       @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
+                                       @PathVariable long id) {
+        requireAdmin(suppliedToken);
+        try { return rules.retireEndpointOverride(id, actor); }
+        catch (IllegalArgumentException | IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
+    }
+
     @PostMapping("/operator/rules/custom")
     public ManagedRule createCustom(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
                                     @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
@@ -91,19 +121,22 @@ public class RuleManagementController {
 
     @GetMapping(value = "/agent/rules/bundle", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> bundleForAgent(HttpServletRequest request) {
-        authenticatedAgent(request); return bundleResponse(requireActive());
+        String agentId = authenticatedAgent(request);
+        return bundleResponse(requireEffective(agentId));
     }
 
     @PostMapping(value = "/agent/rules/fetch", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> fetchForAgent(HttpServletRequest request) {
-        authenticatedAgent(request); return bundleResponse(requireActive());
+        String agentId = authenticatedAgent(request);
+        return bundleResponse(requireEffective(agentId));
     }
 
     @GetMapping("/agent/rules/current")
     public AgentRuleBundle currentForAgent(HttpServletRequest request) {
         String agentId = authenticatedAgent(request);
-        PublishedRuleSet active = requireActive();
-        return new AgentRuleBundle(agentId, active.revision(), active.version(), active.sha256(), active.bundle());
+        EffectiveRuleSet effective = requireEffective(agentId);
+        return new AgentRuleBundle(agentId, effective.revision(), effective.version(), effective.sha256(),
+                effective.bundle(), effective.appliedOverrideIds());
     }
 
     @PostMapping("/agent/rules/ack")
@@ -114,10 +147,10 @@ public class RuleManagementController {
         String state = request.status() == null || request.status().isBlank() ? "ACTIVE" : request.status().trim().toUpperCase();
         if (!AGENT_RULE_STATES.contains(state))
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported agent rule state: " + state);
-        PublishedRuleSet active = requireActive();
-        if (request.revision() != active.revision() || !request.sha256().equalsIgnoreCase(active.sha256()))
+        EffectiveRuleSet effective = requireEffective(agentId);
+        if (request.revision() != effective.revision() || !request.sha256().equalsIgnoreCase(effective.sha256()))
             throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "agent rule state does not match the currently published revision/hash");
+                    "agent rule state does not match this endpoint's current effective revision/hash");
         rules.acknowledge(agentId, request.revision(), request.sha256(), state, request.error());
         return new AckResponse(true, agentId, request.revision(), request.sha256(), state);
     }
@@ -131,19 +164,27 @@ public class RuleManagementController {
         }
     }
 
-    private ResponseEntity<String> bundleResponse(PublishedRuleSet active) {
+    private ResponseEntity<String> bundleResponse(EffectiveRuleSet effective) {
         return ResponseEntity.ok()
-                .header("X-NETA-Rule-Revision", Long.toString(active.revision()))
-                .header("X-NETA-Rule-Version", active.version())
-                .header("X-NETA-Rule-SHA256", active.sha256())
+                .header("X-NETA-Rule-Revision", Long.toString(effective.revision()))
+                .header("X-NETA-Rule-Version", effective.version())
+                .header("X-NETA-Rule-SHA256", effective.sha256())
+                .header("X-NETA-Rule-Override-Count", Integer.toString(effective.appliedOverrideIds().size()))
                 .header(HttpHeaders.CACHE_CONTROL, "no-store")
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(active.bundleText());
+                .body(effective.bundleText());
     }
 
     private PublishedRuleSet requireActive() {
         try { return rules.active(); }
         catch (IllegalStateException e) { throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e); }
+    }
+
+    private EffectiveRuleSet requireEffective(String agentId) {
+        try { return rules.effectiveForAgent(agentId); }
+        catch (IllegalStateException | IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e);
+        }
     }
 
     private String authenticatedAgent(HttpServletRequest request) {
@@ -179,7 +220,8 @@ public class RuleManagementController {
     public record CustomRuleRequest(String id, String engineRuleId, String name, String severity, Boolean enabled,
                                     JsonNode parameters, JsonNode exclude) {}
     public record RuleRevisionRequest(String name, String severity, Boolean enabled, JsonNode parameters, JsonNode exclude) {}
-    public record AgentRuleBundle(String agentId, long revision, String version, String sha256, JsonNode bundle) {}
+    public record AgentRuleBundle(String agentId, long revision, String version, String sha256, JsonNode bundle,
+                                  List<Long> appliedOverrideIds) {}
     public record RuleAck(long revision, String sha256, String status, String error) {}
     public record AckResponse(boolean accepted, String agentId, long revision, String sha256, String status) {}
 }
