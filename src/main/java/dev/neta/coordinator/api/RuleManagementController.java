@@ -59,7 +59,7 @@ public class RuleManagementController {
         requireAdmin(suppliedToken);
         try {
             return rules.createCustom(request.id(), request.engineRuleId(), request.name(), request.severity(),
-                    request.enabled() == null || request.enabled(), request.parameters(), actor);
+                    request.enabled() == null || request.enabled(), request.parameters(), request.exclude(), actor);
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
         }
@@ -72,7 +72,7 @@ public class RuleManagementController {
                               @RequestBody RuleRevisionRequest request) {
         requireAdmin(suppliedToken);
         try {
-            return rules.revise(id, request.name(), request.severity(), request.enabled(), request.parameters(), actor);
+            return rules.revise(id, request.name(), request.severity(), request.enabled(), request.parameters(), request.exclude(), actor);
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
         }
@@ -86,20 +86,16 @@ public class RuleManagementController {
     }
 
     @GetMapping("/rule-sets/active")
-    public PublishedRuleSet active() {
-        return requireActive();
-    }
+    public PublishedRuleSet active() { return requireActive(); }
 
     @GetMapping(value = "/agent/rules/bundle", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> bundleForAgent(HttpServletRequest request) {
-        authenticatedAgent(request);
-        return bundleResponse(requireActive());
+        authenticatedAgent(request); return bundleResponse(requireActive());
     }
 
     @PostMapping(value = "/agent/rules/fetch", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> fetchForAgent(HttpServletRequest request) {
-        authenticatedAgent(request);
-        return bundleResponse(requireActive());
+        authenticatedAgent(request); return bundleResponse(requireActive());
     }
 
     @GetMapping("/agent/rules/current")
@@ -112,18 +108,15 @@ public class RuleManagementController {
     @PostMapping("/agent/rules/ack")
     public AckResponse acknowledge(HttpServletRequest servletRequest, @RequestBody RuleAck request) {
         String agentId = authenticatedAgent(servletRequest);
-        if (request.sha256() == null || request.sha256().isBlank()) {
+        if (request.sha256() == null || request.sha256().isBlank())
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sha256 is required");
-        }
         String state = request.status() == null || request.status().isBlank() ? "ACTIVE" : request.status().trim().toUpperCase();
-        if (!AGENT_RULE_STATES.contains(state)) {
+        if (!AGENT_RULE_STATES.contains(state))
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported agent rule state: " + state);
-        }
         PublishedRuleSet active = requireActive();
-        if (request.revision() != active.revision() || !request.sha256().equalsIgnoreCase(active.sha256())) {
+        if (request.revision() != active.revision() || !request.sha256().equalsIgnoreCase(active.sha256()))
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "agent rule state does not match the currently published revision/hash");
-        }
         rules.acknowledge(agentId, request.revision(), request.sha256(), state, request.error());
         return new AckResponse(true, agentId, request.revision(), request.sha256(), state);
     }
@@ -146,11 +139,8 @@ public class RuleManagementController {
     private String authenticatedAgent(HttpServletRequest request) {
         String fingerprint = certificates.sha256Fingerprint(request)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "agent mTLS certificate is required"));
-        List<String> agents = jdbc.query("""
-                SELECT agent_id FROM agents
-                WHERE certificate_sha256=? AND status='ACTIVE'
-                LIMIT 2
-                """, (rs, n) -> rs.getString(1), fingerprint);
+        List<String> agents = jdbc.query("SELECT agent_id FROM agents WHERE certificate_sha256=? AND status='ACTIVE' LIMIT 2",
+                (rs, n) -> rs.getString(1), fingerprint);
         if (agents.size() != 1) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,
                 "agent certificate is not bound to one active endpoint");
         return agents.getFirst();
@@ -176,8 +166,9 @@ public class RuleManagementController {
 
     public record RuleCatalogResponse(List<ManagedRule> items, RuleSetSummary activeRuleSet) {}
     public record RuleSetSummary(long revision, String version, String sha256, java.time.Instant publishedAt) {}
-    public record CustomRuleRequest(String id, String engineRuleId, String name, String severity, Boolean enabled, JsonNode parameters) {}
-    public record RuleRevisionRequest(String name, String severity, Boolean enabled, JsonNode parameters) {}
+    public record CustomRuleRequest(String id, String engineRuleId, String name, String severity, Boolean enabled,
+                                    JsonNode parameters, JsonNode exclude) {}
+    public record RuleRevisionRequest(String name, String severity, Boolean enabled, JsonNode parameters, JsonNode exclude) {}
     public record AgentRuleBundle(String agentId, long revision, String version, String sha256, JsonNode bundle) {}
     public record RuleAck(long revision, String sha256, String status, String error) {}
     public record AckResponse(boolean accepted, String agentId, long revision, String sha256, String status) {}
