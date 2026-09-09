@@ -71,6 +71,7 @@ public class RuleManagementController {
                               @PathVariable String id,
                               @RequestBody RuleRevisionRequest request) {
         requireAdmin(suppliedToken);
+        rejectUnsupportedVerdictExclusion(id, request.exclude());
         try {
             return rules.revise(id, request.name(), request.severity(), request.enabled(), request.parameters(), request.exclude(), actor);
         } catch (IllegalArgumentException e) {
@@ -119,6 +120,15 @@ public class RuleManagementController {
                     "agent rule state does not match the currently published revision/hash");
         rules.acknowledge(agentId, request.revision(), request.sha256(), state, request.error());
         return new AckResponse(true, agentId, request.revision(), request.sha256(), state);
+    }
+
+    private static void rejectUnsupportedVerdictExclusion(String id, JsonNode exclude) {
+        if (exclude == null || !exclude.isObject() || exclude.isEmpty()) return;
+        String normalized = id == null ? "" : id.toUpperCase();
+        if (normalized.startsWith("NETA-PERF-") || normalized.startsWith("NETA-TRUST-")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "per-rule exclusions are supported by process, behavior, network, DNS, TLS and route finding engines; PERF/TRUST verdict policies do not have process context");
+        }
     }
 
     private ResponseEntity<String> bundleResponse(PublishedRuleSet active) {
