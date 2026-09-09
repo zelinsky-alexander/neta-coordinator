@@ -22,7 +22,11 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class RuleManagementService {
     private static final Set<String> CUSTOM_ENGINES = Set.of(
-            "NETA-PROC-001", "NETA-PROC-002", "NETA-PROC-003", "NETA-PROC-004", "NETA-PROC-005");
+            "NETA-PERF-001", "NETA-TRUST-001", "NETA-TRUST-002",
+            "NETA-PROC-001", "NETA-PROC-002", "NETA-PROC-003", "NETA-PROC-004", "NETA-PROC-005",
+            "NETA-BEH-001", "NETA-NET-001", "NETA-NET-002", "NETA-NET-003", "NETA-NET-004",
+            "NETA-DNS-001", "NETA-DNS-002", "NETA-DNS-003",
+            "NETA-TLS-001", "NETA-TLS-002", "NETA-ROUTE-001");
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
@@ -50,22 +54,25 @@ public class RuleManagementService {
                                     boolean enabled, JsonNode parameters, String actor) {
         String engine = required(engineRuleId, "engineRuleId").toUpperCase(Locale.ROOT);
         if (!CUSTOM_ENGINES.contains(engine)) {
-            throw new IllegalArgumentException("custom rules currently support process engines NETA-PROC-001 through NETA-PROC-005");
+            throw new IllegalArgumentException("unsupported trusted engine for custom rule: " + engine);
         }
         String id = requestedId == null || requestedId.isBlank()
                 ? "CUS-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT)
                 : requestedId.trim().toUpperCase(Locale.ROOT);
-        if (!id.matches("CUS-[A-Z0-9._-]{3,60}")) throw new IllegalArgumentException("custom rule id must match CUS-[A-Z0-9._-]{3,60}");
+        if (!id.matches("CUS-[A-Z0-9._-]{3,60}"))
+            throw new IllegalArgumentException("custom rule id must match CUS-[A-Z0-9._-]{3,60}");
         if (exists(id)) throw new IllegalArgumentException("rule already exists: " + id);
         String normalizedSeverity = severity == null ? "medium" : severity.trim().toLowerCase(Locale.ROOT);
-        if (!Set.of("low", "medium", "high").contains(normalizedSeverity)) throw new IllegalArgumentException("severity must be low, medium, or high");
+        if (!Set.of("low", "medium", "high").contains(normalizedSeverity))
+            throw new IllegalArgumentException("severity must be low, medium, or high");
         JsonNode params = parameters == null ? json.createObjectNode() : parameters;
         if (!params.isObject()) throw new IllegalArgumentException("parameters must be a JSON object");
         validateParametersAgainstEngine(engine, params);
         jdbc.update("""
                 INSERT INTO rule_definitions(rule_id,revision,origin,engine_rule_id,name,category,severity,enabled,parameters_json,created_by)
                 VALUES (?,1,'CUSTOM',?,?,?,?,?,?::jsonb,?)
-                """, id, engine, required(name, "name"), "process", normalizedSeverity, enabled, write(params), actorValue(actor));
+                """, id, engine, required(name, "name"), engineCategory(engine), normalizedSeverity,
+                enabled, write(params), actorValue(actor));
         return current(id);
     }
 
@@ -75,7 +82,8 @@ public class RuleManagementService {
         long revision = current.revision() + 1;
         String nextName = name == null || name.isBlank() ? current.name() : name.trim();
         String nextSeverity = severity == null || severity.isBlank() ? current.severity() : severity.trim().toLowerCase(Locale.ROOT);
-        if (!Set.of("low", "medium", "high").contains(nextSeverity)) throw new IllegalArgumentException("severity must be low, medium, or high");
+        if (!Set.of("low", "medium", "high").contains(nextSeverity))
+            throw new IllegalArgumentException("severity must be low, medium, or high");
         JsonNode nextParameters = parameters == null ? current.parameters() : parameters;
         if (!nextParameters.isObject()) throw new IllegalArgumentException("parameters must be a JSON object");
         validateParametersAgainstEngine(current.engineRuleId(), nextParameters);
@@ -148,6 +156,15 @@ public class RuleManagementService {
                 """, agentId, revision, sha256, status, error);
     }
 
+    private String engineCategory(String engineRuleId) {
+        List<String> categories = jdbc.query("""
+                SELECT category FROM rule_definitions
+                WHERE rule_id=? AND origin='DEFAULT' ORDER BY revision DESC LIMIT 1
+                """, (rs, n) -> rs.getString(1), engineRuleId);
+        if (categories.isEmpty()) throw new IllegalArgumentException("unknown engine rule: " + engineRuleId);
+        return categories.getFirst();
+    }
+
     private void validateParametersAgainstEngine(String engineRuleId, JsonNode parameters) {
         List<String> defaults = jdbc.query("""
                 SELECT parameters_json::text FROM rule_definitions
@@ -171,6 +188,11 @@ public class RuleManagementService {
                     || (expectedValue.isTextual() && supplied.isTextual())
                     || (expectedValue.isArray() && supplied.isArray());
             if (!compatible) throw new IllegalArgumentException("parameter " + field + " has the wrong JSON type");
+            if (expectedValue.isArray()) {
+                for (JsonNode item : supplied) {
+                    if (!item.isTextual()) throw new IllegalArgumentException("array parameter " + field + " must contain strings");
+                }
+            }
         }
     }
 
@@ -194,12 +216,10 @@ public class RuleManagementService {
         try { return json.readTree(value); }
         catch (JsonProcessingException e) { throw new IllegalStateException("invalid rule JSON in database", e); }
     }
-
     private String write(JsonNode value) {
         try { return json.writeValueAsString(value); }
         catch (JsonProcessingException e) { throw new IllegalStateException("cannot serialize rule JSON", e); }
     }
-
     private static String sha256(String value) {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); }
         catch (NoSuchAlgorithmException e) { throw new IllegalStateException("SHA-256 unavailable", e); }
