@@ -1,0 +1,302 @@
+package dev.neta.coordinator.api;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import dev.neta.coordinator.incident.IncidentService;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
+
+/**
+ * RM3.2 explicit finding-resolution API.
+ *
+ * Dismiss closes only the current finding. Exact suppression is intentionally
+ * left on the legacy /finding-suppress endpoint. False-positive tuning records
+ * analyst feedback and may stage a policy proposal, but does not create an
+ * exact suppression as a side effect.
+ */
+@RestController
+@RequestMapping("/api/v1/operator")
+public class FindingResolutionController {
+    private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
+    private static final Set<String> TUNING_SCOPES = Set.of("ENDPOINT", "GROUP", "GLOBAL");
+    private static final Set<String> TUNING_ACTIONS = Set.of("NONE", "PROPOSE_RULE_EXCLUSION", "PROPOSE_BASELINE");
+
+    private final JdbcTemplate jdbc;
+    private final ObjectMapper mapper;
+    private final IncidentService incidents;
+    private final String adminToken;
+
+    public FindingResolutionController(JdbcTemplate jdbc,
+                                       ObjectMapper mapper,
+                                       IncidentService incidents,
+                                       @Value("${NETA_OPERATOR_ADMIN_TOKEN:}") String adminToken) {
+        this.jdbc = jdbc;
+        this.mapper = mapper;
+        this.incidents = incidents;
+        this.adminToken = adminToken == null ? "" : adminToken;
+    }
+
+    @PostMapping(value = "/finding-dismiss", produces = MediaType.TEXT_PLAIN_VALUE)
+    @Transactional
+    public String dismiss(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                          @RequestParam("id") String findingId,
+                          @RequestParam("reason") String reason) {
+        requireAdmin(suppliedToken);
+        FindingRef finding = loadFinding(findingId, reason);
+        List<String> incidentIds = incidentIds(finding.findingId());
+        removeActiveFinding(finding.findingId());
+        audit("FINDING_DISMISSED", finding, reason, "DISMISSED", null, null, null, incidentIds);
+        return "Dismissed finding " + finding.findingId()
+                + ". No suppression or detection-policy change was created; the same behavior may alert again.\n";
+    }
+
+    @PostMapping(value = "/finding-tune", produces = MediaType.TEXT_PLAIN_VALUE)
+    @Transactional
+    public String tune(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                       @RequestParam("id") String findingId,
+                       @RequestParam("reason") String reason,
+                       @RequestParam(value = "scope", defaultValue = "ENDPOINT") String requestedScope,
+                       @RequestParam(value = "action", defaultValue = "NONE") String requestedAction) {
+        requireAdmin(suppliedToken);
+        String scope = normalized(requestedScope, TUNING_SCOPES, "unsupported false-positive scope");
+        String action = normalized(requestedAction, TUNING_ACTIONS, "unsupported false-positive tuning action");
+        if ("GROUP".equals(scope) && !"NONE".equals(action)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "group-scoped tuning requires endpoint-group identity support from a later RM3 slice");
+        }
+
+        FindingRef finding = loadFinding(findingId, reason);
+        List<String> incidentIds = incidentIds(finding.findingId());
+        long feedbackId = recordFeedback(finding, reason, scope, action);
+        if ("PROPOSE_RULE_EXCLUSION".equals(action)) {
+            stageRuleExclusion(finding, reason, scope, feedbackId);
+        } else if ("PROPOSE_BASELINE".equals(action)) {
+            stageBaselineCandidate(finding, feedbackId);
+        }
+
+        removeActiveFinding(finding.findingId());
+        audit("FINDING_FALSE_POSITIVE_TUNED", finding, reason, "FALSE_POSITIVE",
+                scope, action, feedbackId, incidentIds);
+
+        String proposal = "NONE".equals(action)
+                ? " No policy proposal was created."
+                : " A " + action + " proposal was staged for " + scope
+                    + " scope and is not active until explicitly approved/published.";
+        return "Marked finding " + finding.findingId()
+                + " as false positive and retained analyst feedback. No exact suppression was created."
+                + proposal + "\n";
+    }
+
+    private FindingRef loadFinding(String findingId, String reason) {
+        requireText(findingId, "finding id is required");
+        requireText(reason, "reason is required");
+        if (reason.length() > 1000) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "reason must be at most 1000 characters");
+        }
+        List<FindingRef> rows = jdbc.query("""
+                SELECT finding_id,finding_key,agent_id,rule_id,subject_type,subject_id,
+                       target_host,target_port,severity,changes::text
+                FROM findings WHERE finding_id=?
+                """, (rs, n) -> new FindingRef(
+                rs.getString("finding_id"), rs.getString("finding_key"), rs.getString("agent_id"),
+                rs.getString("rule_id"), rs.getString("subject_type"), rs.getString("subject_id"),
+                rs.getString("target_host"), rs.getObject("target_port", Integer.class), rs.getString("severity"),
+                rs.getString("changes")), findingId);
+        if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "finding not found");
+        return rows.getFirst();
+    }
+
+    private List<String> incidentIds(String findingId) {
+        return jdbc.query("SELECT incident_id FROM incident_findings WHERE finding_id=?",
+                (rs, n) -> rs.getString(1), findingId);
+    }
+
+    private void removeActiveFinding(String findingId) {
+        jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?", findingId);
+        jdbc.update("DELETE FROM incident_findings WHERE finding_id=?", findingId);
+        jdbc.update("DELETE FROM findings WHERE finding_id=?", findingId);
+        jdbc.update("DELETE FROM incidents i WHERE NOT EXISTS (SELECT 1 FROM incident_findings m WHERE m.incident_id=i.incident_id)");
+        incidents.syncAll();
+    }
+
+    private long recordFeedback(FindingRef finding, String reason, String scope, String action) {
+        ObjectNode context = mapper.createObjectNode();
+        if (finding.targetHost() != null) context.put("target_host", finding.targetHost());
+        if (finding.targetPort() != null) context.put("target_port", finding.targetPort());
+        if (finding.severity() != null) context.put("severity", finding.severity());
+        String processImage = changeValue(finding.changes(), "Process image:");
+        String parentImage = changeValue(finding.changes(), "Parent image:");
+        if (processImage != null) context.put("process_image", processImage);
+        if (parentImage != null) context.put("parent_image", parentImage);
+        Long id = jdbc.queryForObject("""
+                INSERT INTO finding_feedback(finding_id_snapshot,agent_id,finding_key,rule_id,subject_type,subject_id,
+                                             feedback_type,requested_scope,requested_action,reason,context_json)
+                VALUES (?,?,?,?,?,?,'FALSE_POSITIVE',?,?,?,?::jsonb)
+                RETURNING feedback_id
+                """, Long.class, finding.findingId(), finding.agentId(), finding.findingKey(),
+                canonicalRuleId(finding.ruleId()), finding.subjectType(), finding.subjectId(), scope, action,
+                reason, write(context));
+        if (id == null) throw new IllegalStateException("failed to persist false-positive feedback");
+        return id;
+    }
+
+    private void stageRuleExclusion(FindingRef finding, String reason, String scope, long feedbackId) {
+        String canonicalRule = canonicalRuleId(finding.ruleId());
+        if (canonicalRule == null || canonicalRule.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "finding does not expose a rule id that can be tuned");
+        }
+        ObjectNode patch = mapper.createObjectNode();
+        if ("NETA-PROC-002".equals(canonicalRule)) {
+            String parent = leaf(changeValue(finding.changes(), "Parent image:"));
+            if (parent == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "shell-parent exclusion proposal requires Parent image evidence");
+            }
+            patch.putArray("parent_process_names").add(parent);
+        } else {
+            String process = leaf(changeValue(finding.changes(), "Process image:"));
+            if (process != null) patch.putArray("process_names").add(process);
+            else if (finding.targetHost() != null && !finding.targetHost().isBlank())
+                patch.putArray("remote_hosts").add(finding.targetHost());
+            else throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "this finding does not expose a safe minimal exclusion candidate yet");
+        }
+        String scopeType = "GLOBAL".equals(scope) ? "GLOBAL" : "ENDPOINT";
+        String scopeId = "GLOBAL".equals(scope) ? null : finding.agentId();
+        jdbc.update("""
+                INSERT INTO rule_overrides(scope_type,scope_id,rule_id,exclusions_patch,status,source_feedback_id,reason)
+                VALUES (?,?,?,?::jsonb,'STAGED',?,?)
+                """, scopeType, scopeId, canonicalRule, write(patch), feedbackId, reason);
+    }
+
+    private void stageBaselineCandidate(FindingRef finding, long feedbackId) {
+        if (!"PROCESS".equalsIgnoreCase(finding.subjectType())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "baseline proposal is currently implemented for process findings only");
+        }
+        String process = changeValue(finding.changes(), "Process image:");
+        String parent = changeValue(finding.changes(), "Parent image:");
+        if (process == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                "process baseline proposal requires Process image evidence");
+        ObjectNode evidence = mapper.createObjectNode();
+        evidence.put("source_feedback_id", feedbackId);
+        evidence.put("process_image", process);
+        if (parent != null) evidence.put("parent_image", parent);
+        String key = (parent == null ? "" : parent) + "->" + process;
+        jdbc.update("""
+                INSERT INTO baseline_candidates(agent_id,rule_id,candidate_type,candidate_key,evidence_json)
+                VALUES (?,?,'PROCESS_PARENT_CHILD',?,?::jsonb)
+                ON CONFLICT(agent_id,candidate_type,candidate_key) DO UPDATE SET
+                    observation_count=baseline_candidates.observation_count+1,
+                    last_seen=now(), evidence_json=EXCLUDED.evidence_json
+                """, finding.agentId(), canonicalRuleId(finding.ruleId()), key, write(evidence));
+    }
+
+    private void audit(String eventType, FindingRef finding, String reason, String disposition,
+                       String scope, String action, Long feedbackId, List<String> incidentIds) {
+        try {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("finding_id", finding.findingId());
+            details.put("finding_key", finding.findingKey());
+            details.put("disposition", disposition);
+            details.put("reason", reason);
+            if (scope != null) details.put("requested_scope", scope);
+            if (action != null) details.put("requested_action", action);
+            if (feedbackId != null) details.put("feedback_id", feedbackId);
+            if (finding.ruleId() != null) details.put("rule_id", canonicalRuleId(finding.ruleId()));
+            if (finding.subjectType() != null) details.put("subject_type", finding.subjectType());
+            if (finding.subjectId() != null) details.put("subject_id", finding.subjectId());
+            if (!incidentIds.isEmpty()) details.put("former_incidents", incidentIds);
+            jdbc.update("INSERT INTO audit_events(event_type,agent_id,details) VALUES (?,?,CAST(? AS jsonb))",
+                    eventType, finding.agentId(), mapper.writeValueAsString(details));
+        } catch (Exception e) {
+            throw new IllegalStateException("failed to record finding resolution audit event", e);
+        }
+    }
+
+    private String changeValue(String changes, String prefix) {
+        if (changes == null || changes.isBlank()) return null;
+        try {
+            JsonNode root = mapper.readTree(changes);
+            if (!root.isArray()) return null;
+            for (JsonNode item : root) {
+                if (!item.isTextual()) continue;
+                String value = item.asText();
+                if (value.regionMatches(true, 0, prefix, 0, prefix.length())) {
+                    String extracted = value.substring(prefix.length()).trim();
+                    return extracted.isBlank() ? null : extracted;
+                }
+            }
+        } catch (Exception ignored) { }
+        return null;
+    }
+
+    private static String leaf(String path) {
+        if (path == null || path.isBlank()) return null;
+        String normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT);
+        int slash = normalized.lastIndexOf('/');
+        String value = slash >= 0 ? normalized.substring(slash + 1) : normalized;
+        return value.isBlank() ? null : value;
+    }
+
+    private static String canonicalRuleId(String ruleId) {
+        if (ruleId == null || ruleId.isBlank()) return ruleId;
+        return switch (ruleId) {
+            case "PROCESS_EXEC_FROM_TRANSIENT_PATH" -> "NETA-PROC-001";
+            case "PROCESS_SHELL_FROM_UNEXPECTED_PARENT" -> "NETA-PROC-002";
+            case "PROCESS_UNEXPECTED_ELEVATION" -> "NETA-PROC-003";
+            case "PROCESS_RAPID_CHILD_FANOUT" -> "NETA-PROC-004";
+            case "PROCESS_SHORT_LIVED_BURST" -> "NETA-PROC-005";
+            default -> ruleId;
+        };
+    }
+
+    private String write(JsonNode value) {
+        try { return mapper.writeValueAsString(value); }
+        catch (Exception e) { throw new IllegalStateException("failed to serialize tuning context", e); }
+    }
+
+    private static String normalized(String value, Set<String> supported, String message) {
+        String result = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if (!supported.contains(result)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+        return result;
+    }
+
+    private void requireAdmin(String suppliedToken) {
+        if (adminToken.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "finding administration is disabled; configure NETA_OPERATOR_ADMIN_TOKEN");
+        }
+        byte[] expected = adminToken.getBytes(StandardCharsets.UTF_8);
+        byte[] supplied = (suppliedToken == null ? "" : suppliedToken).getBytes(StandardCharsets.UTF_8);
+        if (!MessageDigest.isEqual(expected, supplied)) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid operator admin token");
+        }
+    }
+
+    private static void requireText(String value, String message) {
+        if (value == null || value.isBlank()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
+    }
+
+    private record FindingRef(String findingId, String findingKey, String agentId,
+                              String ruleId, String subjectType, String subjectId,
+                              String targetHost, Integer targetPort, String severity,
+                              String changes) {}
+}
