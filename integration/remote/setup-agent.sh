@@ -11,6 +11,7 @@ set -euo pipefail
 ROOT=/opt/neta-acceptance
 SRC="$ROOT/src"
 CA_FILE="$ROOT/fleet-ca.crt"
+STATE_DIR=/var/lib/neta/identity
 mkdir -p "$SRC"
 [[ -r "$CA_FILE" ]] || { echo "missing $CA_FILE" >&2; exit 1; }
 
@@ -31,16 +32,31 @@ checkout_ref "$AGENT_REPOSITORY" "$AGENT_REF" "$SRC/agent"
 checkout_ref "$LAB_REPOSITORY" "$LAB_REF" "$SRC/lab"
 
 cd "$SRC/agent"
+if ! grep -q 'NETA_SKIP_GIT_UPDATE' deploy/linux/install-or-update.sh; then
+  echo "ERROR: selected agent ref predates exact-ref integration install support; refusing to silently switch branches" >&2
+  exit 3
+fi
 NETA_SKIP_GIT_UPDATE=1 ./deploy/linux/install-or-update.sh
 
-NETA_ENROLLMENT_TOKEN="$NETA_ENROLLMENT_TOKEN" \
-  ./deploy/linux/enroll.sh \
-  "https://${COORDINATOR_PRIVATE_IP}:8443" \
-  "$CA_FILE" \
-  neta-acceptance-linux \
-  fleet-acceptance
+mkdir -p "$STATE_DIR"
+chmod 0700 "$STATE_DIR"
+/usr/local/bin/neta-agent fleet enroll \
+  --coordinator "https://${COORDINATOR_PRIVATE_IP}:8443" \
+  --fleet-id fleet-acceptance \
+  --fleet-ca "$CA_FILE" \
+  --token "$NETA_ENROLLMENT_TOKEN" \
+  --display-name neta-acceptance-linux \
+  --state-dir "$STATE_DIR"
+unset NETA_ENROLLMENT_TOKEN
+chmod 0700 "$STATE_DIR"
+chmod 0600 "$STATE_DIR/agent.key" "$STATE_DIR/identity.conf" "$STATE_DIR/sequence"
+chmod 0644 "$STATE_DIR/agent.crt" "$STATE_DIR/fleet-ca.crt"
+/usr/local/bin/neta-agent fleet status --state-dir "$STATE_DIR"
+/usr/local/bin/neta-agent fleet hello --state-dir "$STATE_DIR"
+/usr/local/bin/neta-agent fleet heartbeat --state-dir "$STATE_DIR"
+systemctl restart neta-agent.service
 
-/usr/local/bin/neta-agent fleet rules-update --state-dir /var/lib/neta/identity
+/usr/local/bin/neta-agent fleet rules-update --state-dir "$STATE_DIR"
 ./deploy/linux/health-check.sh
 
 cat >"$ROOT/revisions.txt" <<EOF
@@ -52,5 +68,4 @@ lab_ref=$LAB_REF
 lab_commit=$(git -C "$SRC/lab" rev-parse HEAD)
 EOF
 
-unset NETA_ENROLLMENT_TOKEN
 echo "NETA Linux agent fresh setup and enrollment complete"
