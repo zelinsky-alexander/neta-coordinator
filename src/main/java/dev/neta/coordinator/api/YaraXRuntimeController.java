@@ -38,7 +38,7 @@ public class YaraXRuntimeController {
         var desired = jdbc.queryForMap("SELECT target_version, previous_version, rollout_percent, updated_by, updated_at FROM yarax_runtime_desired WHERE singleton=1");
         var releases = jdbc.queryForList("SELECT version,source_ref,release_base_url,priority,x86_64_sha256,arm64_sha256,status,created_by,created_at,activated_at FROM yarax_runtime_releases ORDER BY created_at DESC LIMIT 50");
         var agents = jdbc.queryForList("""
-            SELECT a.agent_id, a.display_name, a.platform, a.arch,
+            SELECT a.agent_id, a.display_name, a.agent_os AS platform, a.agent_arch AS arch,
                    s.installed_version, s.active_version, s.active_sha256,
                    s.desired_version, COALESCE(s.state,'UNKNOWN') AS state,
                    s.error, s.last_ack_at, s.updated_at
@@ -60,7 +60,7 @@ public class YaraXRuntimeController {
         validateSha(request.x86_64Sha256()); validateSha(request.arm64Sha256());
         String source = required(request.sourceRef(), "sourceRef");
         String base = required(request.releaseBaseUrl(), "releaseBaseUrl");
-        if (!base.startsWith("https://github.com/zelinsky-alexander/neta-agent/releases/download/yarax-runtime-v" + version)) bad("releaseBaseUrl must reference the matching NETA GitHub release");
+        if (!base.equals("https://github.com/zelinsky-alexander/neta-agent/releases/download/yarax-runtime-v" + version)) bad("releaseBaseUrl must reference the matching NETA GitHub release");
         String by = actor == null || actor.isBlank() ? "operator" : actor;
         jdbc.update("""
             INSERT INTO yarax_runtime_releases(version,source_ref,release_base_url,priority,x86_64_sha256,arm64_sha256,status,created_by)
@@ -99,9 +99,18 @@ public class YaraXRuntimeController {
         String priority = (String) release.get("priority");
         boolean selected = priority.equals("EMERGENCY") || percent >= 100 || cohort(agentId) < percent;
         if (!selected) return new AgentRuntime(agentId, false, target, null, null, priority, percent);
-        String arch = jdbc.queryForObject("SELECT arch FROM agents WHERE agent_id=?", String.class, agentId);
-        String sha = arch != null && (arch.equalsIgnoreCase("arm64") || arch.equalsIgnoreCase("aarch64"))
-                ? (String) release.get("arm64_sha256") : (String) release.get("x86_64_sha256");
+        String arch = jdbc.queryForObject("SELECT agent_arch FROM agents WHERE agent_id=?", String.class, agentId);
+        if (arch == null || arch.isBlank()) return new AgentRuntime(agentId, false, target, null, null, priority, percent);
+        String sha;
+        if (arch.equalsIgnoreCase("arm64") || arch.equalsIgnoreCase("aarch64")) sha = (String) release.get("arm64_sha256");
+        else if (arch.equalsIgnoreCase("amd64") || arch.equalsIgnoreCase("x86_64")) sha = (String) release.get("x86_64_sha256");
+        else {
+            jdbc.update("""
+                INSERT INTO yarax_agent_runtime_state(agent_id,desired_version,state,error,updated_at)
+                VALUES (?,?,'UNSUPPORTED',?,now()) ON CONFLICT(agent_id) DO UPDATE SET desired_version=excluded.desired_version,state='UNSUPPORTED',error=excluded.error,updated_at=now()
+                """, agentId, target, "unsupported YARA-X runtime architecture: " + arch);
+            return new AgentRuntime(agentId, false, target, null, null, priority, percent);
+        }
         jdbc.update("""
             INSERT INTO yarax_agent_runtime_state(agent_id,desired_version,state,updated_at)
             VALUES (?,?,'STALE',now()) ON CONFLICT(agent_id) DO UPDATE SET desired_version=excluded.desired_version,
@@ -115,6 +124,7 @@ public class YaraXRuntimeController {
         String agentId = authenticatedAgent(servletRequest);
         String state = required(request.state(), "state").toUpperCase();
         if (!List.of("DOWNLOADING","INSTALLED","ACTIVE","APPLY_FAILED","UNSUPPORTED").contains(state)) bad("invalid state");
+        if (request.activeSha256() != null && !request.activeSha256().isBlank()) validateSha(request.activeSha256());
         jdbc.update("""
             INSERT INTO yarax_agent_runtime_state(agent_id,installed_version,active_version,active_sha256,desired_version,state,error,last_ack_at,updated_at)
             VALUES (?,?,?,?,?,?,?,now(),now()) ON CONFLICT(agent_id) DO UPDATE SET
@@ -126,9 +136,8 @@ public class YaraXRuntimeController {
 
     private void activate(String version, int percent, String actor) {
         if (percent < 0 || percent > 100) bad("rolloutPercent must be between 0 and 100");
-        String current = jdbc.queryForObject("SELECT target_version FROM yarax_runtime_desired WHERE singleton=1", String.class);
         jdbc.update("UPDATE yarax_runtime_releases SET status=CASE WHEN version=? THEN 'ACTIVE' WHEN status='ACTIVE' THEN 'AVAILABLE' ELSE status END, activated_at=CASE WHEN version=? THEN now() ELSE activated_at END", version, version);
-        jdbc.update("UPDATE yarax_runtime_desired SET previous_version=CASE WHEN target_version<>? THEN target_version ELSE previous_version END,target_version=?,rollout_percent=?,updated_by=?,updated_at=now() WHERE singleton=1", version, version, percent, actor);
+        jdbc.update("UPDATE yarax_runtime_desired SET previous_version=CASE WHEN target_version IS DISTINCT FROM ? THEN target_version ELSE previous_version END,target_version=?,rollout_percent=?,updated_by=?,updated_at=now() WHERE singleton=1", version, version, percent, actor);
     }
 
     private String authenticatedAgent(HttpServletRequest request) {
