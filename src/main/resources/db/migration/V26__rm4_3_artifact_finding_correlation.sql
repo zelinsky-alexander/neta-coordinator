@@ -1,7 +1,7 @@
 -- RM4.3: correlate persisted artifact/YARA evidence with process/network findings.
 --
 -- This extends the deterministic RM3.7 confidence model without turning artifact
--- evidence into an authoritative verdict.  A MATCH is one additional independent
+-- evidence into an authoritative verdict. A MATCH is one additional independent
 -- corroborating signal per provider/ruleset when it is bound to the same endpoint,
 -- exact process image path, and a bounded 120-second window.
 
@@ -29,6 +29,14 @@ WITH candidates AS (
            coalesce(a.artifact_corroborators,'[]'::jsonb) AS artifact_corroborators,
            coalesce(a.artifact_corroboration_count,0) AS artifact_corroboration_count
       FROM findings f
+      LEFT JOIN LATERAL (
+          SELECT NULLIF(btrim(substring(value FROM char_length('Process image:') + 1)), '') AS process_image
+            FROM jsonb_array_elements_text(
+                 CASE WHEN jsonb_typeof(f.changes)='array' THEN f.changes ELSE '[]'::jsonb END
+            ) value
+           WHERE value ILIKE 'Process image:%'
+           LIMIT 1
+      ) p ON true
       LEFT JOIN LATERAL (
           SELECT jsonb_agg(x.rule_id ORDER BY x.rule_id) AS rule_corroborators,
                  count(*)::integer AS rule_corroboration_count
@@ -60,9 +68,8 @@ WITH candidates AS (
                   FROM artifact_evidence ae
                  WHERE ae.agent_id=f.agent_id
                    AND upper(ae.scan_state)='MATCH'
-                   AND f.subject_image IS NOT NULL
-                   AND f.subject_image<>''
-                   AND ae.artifact_path=f.subject_image
+                   AND p.process_image IS NOT NULL
+                   AND ae.artifact_path=p.process_image
                    AND coalesce(ae.observed_at,ae.last_seen)
                        BETWEEN f.last_seen - interval '120 seconds'
                            AND f.last_seen + interval '120 seconds'
@@ -105,8 +112,6 @@ UPDATE findings f
  WHERE f.finding_id=s.finding_id;
 $$;
 
--- Artifact evidence can arrive after the corresponding finding, so refresh the
--- endpoint confidence state when a MATCH is inserted or materially updated.
 CREATE OR REPLACE FUNCTION neta_artifact_confidence_trigger()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -125,8 +130,6 @@ AFTER INSERT OR UPDATE OF artifact_path,scan_state,matches,observed_at,last_seen
 ON artifact_evidence
 FOR EACH ROW EXECUTE FUNCTION neta_artifact_confidence_trigger();
 
--- Re-evaluate recent findings so already persisted RM4.1 evidence participates
--- immediately after this migration is deployed.
 DO $$
 DECLARE r record;
 BEGIN
