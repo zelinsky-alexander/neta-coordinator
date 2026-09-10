@@ -158,7 +158,7 @@ public class RuleManagementController {
     private static void rejectUnsupportedVerdictExclusion(String id, JsonNode exclude) {
         if (exclude == null || !exclude.isObject() || exclude.isEmpty()) return;
         String normalized = id == null ? "" : id.toUpperCase();
-        if (normalized.startsWith("NETA-PERF-") || normalized.startsWith("NETA-TRUST-")) {
+        if (normalized.startsWith("PERF-") || normalized.startsWith("TRUST-")) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "per-rule exclusions are supported by process, behavior, network, DNS, TLS and route finding engines; PERF/TRUST verdict policies do not have process context");
         }
