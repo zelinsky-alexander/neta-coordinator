@@ -95,20 +95,21 @@ NETA_BOOTSTRAP_ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN
 NETA_OPERATOR_ADMIN_TOKEN=$ADMIN_TOKEN
 NETA_PORTAL_SERVICE_TOKEN=$PORTAL_SERVICE_TOKEN
 NETA_REQUIRE_CLIENT_CERTIFICATE=true
+# Acceptance-only exposure difference: bind coordinator to the EC2 host so the
+# separately provisioned endpoint can reach it. The temporary SG limits 8443 to
+# members of that SG only.
 NETA_BIND_ADDRESS=0.0.0.0
 NETA_HOST_PORT=8443
 NETA_TLS_KEY_STORE_PASSWORD=$STORE_PASSWORD
 NETA_TLS_TRUST_STORE_PASSWORD=$STORE_PASSWORD
 NETA_ENROLLMENT_ISSUER_KEY_STORE_PASSWORD=$STORE_PASSWORD
-NETA_AGENT_ONLINE_THRESHOLD=PT2M
-NETA_AGENT_OFFLINE_THRESHOLD=PT5M
-NETA_RETAIN_HEARTBEATS=true
-NETA_AUDIT_HEARTBEATS=true
 EOF
 chmod 0600 "$COORD/.env"
 cd "$COORD"
+# Use the production Compose definitions and production mTLS update path.
 docker compose --env-file .env -f docker-compose.yml up -d postgres
 ./deploy/update-mtls.sh
+./deploy/health-check.sh
 for _ in {1..60}; do
   if curl -fsS --cacert "$PKI/fleet-ca.crt" "https://${COORDINATOR_PRIVATE_IP}:8443/actuator/health" | grep -q '"status":"UP"'; then break; fi
   sleep 2
@@ -134,12 +135,57 @@ NETA_COORDINATOR_ALLOW_INSECURE_HTTP=false
 NETA_PORTAL_LEGACY_OPERATOR_API=false
 NETA_PORTAL_USERS_JSON='[{"username":"acceptance","passwordHash":"$PORTAL_HASH","role":"ADMIN"}]'
 NETA_PORTAL_SESSION_SECRET=$PORTAL_SESSION_SECRET
-NETA_PORTAL_SESSION_TTL_SECONDS=3600
+NETA_PORTAL_SESSION_TTL_SECONDS=28800
 EOF
 chmod 0600 "$PORTAL/.env"
 cd "$PORTAL"
+# Start only the production Portal service. The production cloudflared service is
+# intentionally omitted so disposable acceptance portals are never published.
 docker compose --env-file .env -f docker-compose.yml up -d --build portal
 ./deploy/health-check.sh
+
+# Verify that the running topology still has the security/restart properties from
+# the selected production Compose files rather than merely checking HTTP health.
+POSTGRES_CID="$(docker compose -f "$COORD/docker-compose.yml" --env-file "$COORD/.env" ps -q postgres)"
+COORDINATOR_CID="$(docker compose -f "$COORD/docker-compose.yml" -f "$COORD/docker-compose.mtls.yml" --env-file "$COORD/.env" ps -q coordinator)"
+PORTAL_CID="$(docker compose -f "$PORTAL/docker-compose.yml" --env-file "$PORTAL/.env" ps -q portal)"
+[[ -n "$POSTGRES_CID" && -n "$COORDINATOR_CID" && -n "$PORTAL_CID" ]]
+[[ "$POSTGRES_CID" != "$COORDINATOR_CID" && "$COORDINATOR_CID" != "$PORTAL_CID" && "$POSTGRES_CID" != "$PORTAL_CID" ]]
+
+check_restart() {
+  local cid="$1" name="$2" policy
+  policy="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid")"
+  [[ "$policy" == "unless-stopped" ]] || { echo "$name restart policy is $policy, expected unless-stopped" >&2; exit 1; }
+}
+check_restart "$POSTGRES_CID" postgres
+check_restart "$COORDINATOR_CID" coordinator
+check_restart "$PORTAL_CID" portal
+
+[[ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$PORTAL_CID")" == "true" ]] || { echo "portal root filesystem is not read-only" >&2; exit 1; }
+docker inspect -f '{{json .HostConfig.CapDrop}}' "$PORTAL_CID" | grep -q 'ALL' || { echo "portal does not drop all Linux capabilities" >&2; exit 1; }
+docker inspect -f '{{json .HostConfig.SecurityOpt}}' "$PORTAL_CID" | grep -q 'no-new-privileges:true' || { echo "portal no-new-privileges is missing" >&2; exit 1; }
+
+docker port "$PORTAL_CID" 8080/tcp | grep -Eq '^127\.0\.0\.1:8080$' || { echo "portal is not loopback-bound on host port 8080" >&2; exit 1; }
+docker port "$COORDINATOR_CID" 8080/tcp | grep -Eq '(^0\.0\.0\.0:8443$|^\[::\]:8443$)' || { echo "coordinator is not exposed on acceptance host port 8443" >&2; exit 1; }
+[[ -z "$(docker compose -f "$PORTAL/docker-compose.yml" --env-file "$PORTAL/.env" ps -q tunnel 2>/dev/null || true)" ]] || { echo "cloudflared tunnel must not run in acceptance" >&2; exit 1; }
+
+cat >"$ROOT/production-parity.txt" <<EOF
+NETA production-topology parity: PASS
+postgres_container=$POSTGRES_CID
+coordinator_container=$COORDINATOR_CID
+portal_container=$PORTAL_CID
+postgres_restart=unless-stopped
+coordinator_restart=unless-stopped
+portal_restart=unless-stopped
+portal_read_only=true
+portal_cap_drop=ALL
+portal_no_new_privileges=true
+portal_host_binding=127.0.0.1:8080
+coordinator_host_binding=0.0.0.0:8443 (acceptance-only private-VPC reachability)
+cloudflared_tunnel=not_started (intentional acceptance safety boundary)
+coordinator_runtime_defaults=production Compose defaults
+EOF
+cat "$ROOT/production-parity.txt"
 
 cat >"$ROOT/revisions.txt" <<EOF
 coordinator_repository=$COORDINATOR_REPOSITORY
@@ -150,4 +196,4 @@ portal_ref=$PORTAL_REF
 portal_commit=$(git -C "$PORTAL" rev-parse HEAD)
 EOF
 
-echo "NETA coordinator + portal fresh setup complete"
+echo "NETA coordinator + portal fresh production-parity setup complete"
