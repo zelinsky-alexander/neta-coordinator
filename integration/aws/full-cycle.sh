@@ -14,7 +14,7 @@ set -euo pipefail
 : "${LAB_REPOSITORY:?required}"
 : "${LAB_REF:?required}"
 
-COORDINATOR_INSTANCE_TYPE="${COORDINATOR_INSTANCE_TYPE:-t3.medium}"
+COORDINATOR_INSTANCE_TYPE="${COORDINATOR_INSTANCE_TYPE:-t3.small}"
 AGENT_INSTANCE_TYPE="${AGENT_INSTANCE_TYPE:-t3.small}"
 LAB_SCENARIOS="${LAB_SCENARIOS:-all}"
 RUN_ID="${GITHUB_RUN_ID:-local}-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -124,8 +124,9 @@ source "$WORK/runtime.env"
 
 scp_to "$WORK/fleet-ca.crt" "$AGENT_PUBLIC_IP" /tmp/fleet-ca.crt
 scp_to "$SCRIPT_ROOT/remote/setup-agent.sh" "$AGENT_PUBLIC_IP" /tmp/setup-agent.sh
-ssh_host "$AGENT_PUBLIC_IP" "sudo mkdir -p /opt/neta-acceptance && sudo mv /tmp/fleet-ca.crt /opt/neta-acceptance/fleet-ca.crt && sudo chmod 0644 /opt/neta-acceptance/fleet-ca.crt"
-log "installing and enrolling fresh Linux agent"
+scp_to "$SCRIPT_ROOT/remote/install-agent-package.sh" "$AGENT_PUBLIC_IP" /tmp/install-agent-package.sh
+ssh_host "$AGENT_PUBLIC_IP" "sudo chmod 0755 /tmp/install-agent-package.sh; sudo mkdir -p /opt/neta-acceptance && sudo mv /tmp/fleet-ca.crt /opt/neta-acceptance/fleet-ca.crt && sudo chmod 0644 /opt/neta-acceptance/fleet-ca.crt"
+log "installing immutable prebuilt Linux agent package and enrolling endpoint"
 ssh_host "$AGENT_PUBLIC_IP" \
   "sudo env AGENT_REPOSITORY='$AGENT_REPOSITORY' AGENT_REF='$AGENT_REF' LAB_REPOSITORY='$LAB_REPOSITORY' LAB_REF='$LAB_REF' COORDINATOR_PRIVATE_IP='$COORDINATOR_PRIVATE_IP' NETA_ENROLLMENT_TOKEN='$ENROLLMENT_TOKEN' bash /tmp/setup-agent.sh" \
   >"$OUT/logs/agent-setup.log" 2>&1
@@ -213,7 +214,7 @@ cat >"$OUT/ACCEPTANCE.md" <<EOF
 - Fresh cloud instances provisioned: PASS
 - Fresh coordinator/PostgreSQL install with ephemeral PKI: PASS
 - Portal install and health validation: PASS
-- Fresh Linux agent install: PASS
+- Immutable prebuilt Linux agent package install: PASS
 - Noninteractive enrollment and mTLS fleet messaging: PASS
 - Centrally managed rules update: PASS
 - Linux NETA Lab command suite: $([[ $LAB_RC -eq 0 ]] && echo PASS || echo FAIL)
