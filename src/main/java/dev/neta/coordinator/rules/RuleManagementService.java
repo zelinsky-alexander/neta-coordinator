@@ -24,10 +24,10 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class RuleManagementService {
     private static final Set<String> CUSTOM_ENGINES = Set.of(
-            "NETA-PROC-001", "NETA-PROC-002", "NETA-PROC-003", "NETA-PROC-004", "NETA-PROC-005",
-            "NETA-BEH-001", "NETA-NET-001", "NETA-NET-002", "NETA-NET-003", "NETA-NET-004",
-            "NETA-DNS-001", "NETA-DNS-002", "NETA-DNS-003",
-            "NETA-TLS-001", "NETA-TLS-002", "NETA-ROUTE-001");
+            "PROC-001", "PROC-002", "PROC-003", "PROC-004", "PROC-005",
+            "BEH-001", "NET-001", "NET-002", "NET-003", "NET-004",
+            "DNS-001", "DNS-002", "DNS-003",
+            "TLS-001", "TLS-002", "ROUTE-001");
     private static final Set<String> EXCLUSION_FIELDS = Set.of(
             "process_names", "executable_paths", "process_path_prefixes", "parent_process_names", "users",
             "remote_hosts", "remote_ips", "remote_ports", "local_ports", "domains", "directions");
@@ -63,10 +63,10 @@ public class RuleManagementService {
                     "custom rules require a multi-instance process, behavior, network, DNS, TLS, or route engine");
         }
         String id = requestedId == null || requestedId.isBlank()
-                ? "CUS-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT)
+                ? "CST-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT)
                 : requestedId.trim().toUpperCase(Locale.ROOT);
-        if (!id.matches("CUS-[A-Z0-9._-]{3,60}"))
-            throw new IllegalArgumentException("custom rule id must match CUS-[A-Z0-9._-]{3,60}");
+        if (!id.matches("CST-[A-Z0-9._-]{3,60}"))
+            throw new IllegalArgumentException("custom rule id must match CST-[A-Z0-9._-]{3,60}");
         if (exists(id)) throw new IllegalArgumentException("rule already exists: " + id);
         String normalizedSeverity = severity == null ? "medium" : severity.trim().toLowerCase(Locale.ROOT);
         if (!Set.of("low", "medium", "high").contains(normalizedSeverity))
