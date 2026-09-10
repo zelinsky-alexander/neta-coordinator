@@ -2,7 +2,7 @@
 
 This is the manual, destructive integration/acceptance harness for a fresh NETA deployment. It is intentionally **never triggered by push, pull request, schedule, or release**. The only workflow trigger is `workflow_dispatch`.
 
-The workflow provisions two temporary Ubuntu EC2 instances, installs a fresh coordinator/PostgreSQL/portal stack, creates an ephemeral two-day test PKI, installs a fresh Linux agent, enrolls it into the fleet, updates centrally managed rules, executes the Linux NETA Lab suite including two-host inbound scenarios, validates restart/reconnect behavior and a negative mTLS control, collects logs/results, and terminates the temporary EC2 resources in an `EXIT` trap.
+The workflow provisions two temporary Ubuntu EC2 instances, installs a fresh coordinator/PostgreSQL/portal stack in Docker using the repository deployment path, creates an ephemeral two-day test PKI, installs an immutable prebuilt Linux agent package, enrolls it into the fleet, updates centrally managed rules, executes the Linux NETA Lab suite including two-host inbound scenarios, validates restart/reconnect behavior and a negative mTLS control, collects logs/results, and terminates the temporary EC2 resources in an `EXIT` trap.
 
 ## Manual selections
 
@@ -15,7 +15,11 @@ Every run chooses these independently:
 - `all` Linux scenarios or a comma-separated scenario list;
 - coordinator and agent EC2 instance types.
 
-The selected agent ref must contain the exact-ref integration installer support (`NETA_SKIP_GIT_UPDATE`). If it does not, the harness fails rather than silently checking out `main`.
+The workflow defaults both EC2 hosts to `t3.small`, but these are editable workflow-dispatch inputs on every run. The coordinator host runs PostgreSQL, coordinator and portal; the endpoint host runs the packaged NETA agent and NETA Lab.
+
+The selected agent ref is resolved to an exact commit. The harness then requires the immutable development release `dev-<full-commit-sha>` produced by the agent `Build Supported Agent Flavors` workflow. It downloads the matching `linux/amd64` or `linux/arm64` package for the actual EC2 architecture, validates `release-manifest.json`, verifies SHA-256, and installs the package. **No C++ compilation or CMake test build occurs on the acceptance EC2 endpoint.**
+
+If no package exists for the selected ref, acceptance fails before enrollment with an instruction to run `Build Supported Agent Flavors` for that ref with `publish_development=true`.
 
 Windows-only Lab scenarios are reported as `NOT_APPLICABLE` by this Linux acceptance job. NETA-LAB-016 and NETA-LAB-017 are driven by the full-cycle orchestrator because their ground truth requires a second owned host.
 
@@ -27,7 +31,7 @@ Configure these repository variables in `neta-coordinator` before the first run:
 - `NETA_AWS_ROLE_ARN`, the IAM role assumed through GitHub OIDC;
 - `NETA_AWS_VPC_ID`;
 - `NETA_AWS_SUBNET_ID`, a public subnet with an Internet Gateway route;
-- `NETA_AWS_AMI_ID`, an Ubuntu 24.04 x86-64 AMI whose default SSH user is `ubuntu`.
+- `NETA_AWS_AMI_ID`, an Ubuntu 24.04 AMI whose default SSH user is `ubuntu` and whose architecture matches the chosen EC2 instance family.
 
 No long-lived AWS access key, enrollment token, fleet CA key, coordinator private key, portal client key, or agent private key is stored in GitHub. Test secrets and PKI are generated per run and destroyed with the hosts.
 
@@ -98,11 +102,11 @@ The harness creates one temporary security group. SSH is allowed only from the c
 The acceptance path covers:
 
 1. fresh EC2 provisioning and SSH bootstrap;
-2. coordinator and PostgreSQL fresh installation;
+2. coordinator and PostgreSQL fresh installation in Docker;
 3. ephemeral Fleet CA, coordinator server certificate, agent-issuer certificate, trust store, and portal client certificate creation;
 4. coordinator HTTPS/mTLS startup and health;
-5. portal fresh installation, mTLS files, native-auth configuration and health endpoint;
-6. exact selected agent checkout, eBPF-required build/tests and installation;
+5. portal fresh Docker installation, mTLS files, native-auth configuration and health endpoint;
+6. exact selected agent ref resolution, immutable package discovery, manifest/SHA-256 verification and runtime-only installation;
 7. agent CSR enrollment, coordinator-issued identity certificate, `AgentHello` and heartbeat;
 8. central rule-set download/validation/activation;
 9. Linux NETA Lab command suite;
@@ -115,6 +119,18 @@ The acceptance path covers:
 16. unconditional AWS resource cleanup.
 
 The Lab `expected.yaml` files remain the scenario ground-truth specification. The current first integration harness treats scenario command completion plus the NETA system-level evidence/fleet checks as the automated gate; it does not invent semantic assertions when an `expected.yaml` field is not yet exposed by a stable machine-readable coordinator/agent query. Those expected files and runtime evidence should be used to extend scenario-specific assertions as the evidence query surface stabilizes.
+
+## Agent package prerequisite
+
+For the agent repository/ref you intend to test:
+
+1. open **Actions → Build Supported Agent Flavors** in that agent repository;
+2. choose the branch/ref you want to acceptance-test;
+3. run it with `publish_development=true`;
+4. wait for the immutable `dev-<commit-sha>` release to be published;
+5. start the NETA full-cycle workflow and select the same agent repository/ref.
+
+For pushes to `main`, the existing packaging workflow already publishes the Linux development release automatically when its Linux package jobs are green.
 
 ## Output artifact
 
@@ -140,8 +156,8 @@ A failed test still attempts artifact upload, and the AWS cleanup trap still run
 The harness intentionally avoids Terraform, PyYAML and cloud SDK libraries. It uses command-line/runtime components already standard for this deployment path.
 
 - **AWS CLI v2** — Apache-2.0; AWS EC2/STS API calls; actively maintained by AWS. Main security concern: IAM scope, so the acceptance role must remain narrowly permissioned.
-- **OpenSSL** — Apache-2.0; ephemeral keys/certificates and PKCS#12 creation; actively maintained. Test private keys are short-lived and never uploaded as artifacts.
-- **Docker Engine / Moby** — Apache-2.0; existing coordinator/portal deployment runtime; actively maintained. The EC2 hosts are disposable and should use current Ubuntu security updates.
+- **OpenSSL** — Apache-2.0; ephemeral keys/certificates, package TLS runtime dependency and PKCS#12 creation; actively maintained. Test private keys are short-lived and never uploaded as artifacts.
+- **Docker Engine / Moby** — Apache-2.0; existing coordinator/portal production-style deployment runtime; actively maintained. The EC2 hosts are disposable and should use current Ubuntu security updates.
 - **Docker Compose v2** — Apache-2.0; existing deployment orchestration; actively maintained.
 - **GitHub `actions/upload-artifact@v4`** — MIT; uploads the final acceptance directory; maintained by GitHub. It is CI-only, not linked into NETA binaries. Pinning to a reviewed commit SHA can further reduce action supply-chain risk before production use.
 
