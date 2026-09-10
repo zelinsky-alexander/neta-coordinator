@@ -1,0 +1,139 @@
+name: NETA Full-Cycle Linux Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      coordinator_repository:
+        description: Coordinator repository (owner/name)
+        required: true
+        default: zelinsky-alexander/neta-coordinator
+      coordinator_ref:
+        description: Coordinator branch, tag, or commit
+        required: true
+        default: main
+      portal_repository:
+        description: Portal repository (owner/name)
+        required: true
+        default: zelinsky-alexander/neta-portal
+      portal_ref:
+        description: Portal branch, tag, or commit
+        required: true
+        default: main
+      agent_repository:
+        description: Agent repository (owner/name)
+        required: true
+        default: zelinsky-alexander/neta-agent
+      agent_ref:
+        description: Agent branch, tag, or commit
+        required: true
+        default: main
+      lab_repository:
+        description: NETA Lab repository (owner/name)
+        required: true
+        default: zelinsky-alexander/neta-lab
+      lab_ref:
+        description: NETA Lab branch, tag, or commit
+        required: true
+        default: main
+      lab_scenarios:
+        description: all or comma-separated IDs, for example 001,002,016
+        required: true
+        default: all
+      coordinator_instance_type:
+        description: Temporary coordinator EC2 instance type
+        required: true
+        default: t3.medium
+      agent_instance_type:
+        description: Temporary Linux endpoint EC2 instance type
+        required: true
+        default: t3.small
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: neta-full-cycle-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  full-cycle-linux:
+    name: Fresh cloud install, enroll, lab, accept
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      AWS_REGION: ${{ vars.NETA_AWS_REGION }}
+      NETA_AWS_ROLE_ARN: ${{ vars.NETA_AWS_ROLE_ARN }}
+      NETA_AWS_VPC_ID: ${{ vars.NETA_AWS_VPC_ID }}
+      NETA_AWS_SUBNET_ID: ${{ vars.NETA_AWS_SUBNET_ID }}
+      NETA_AWS_AMI_ID: ${{ vars.NETA_AWS_AMI_ID }}
+      COORDINATOR_REPOSITORY: ${{ inputs.coordinator_repository }}
+      COORDINATOR_REF: ${{ inputs.coordinator_ref }}
+      PORTAL_REPOSITORY: ${{ inputs.portal_repository }}
+      PORTAL_REF: ${{ inputs.portal_ref }}
+      AGENT_REPOSITORY: ${{ inputs.agent_repository }}
+      AGENT_REF: ${{ inputs.agent_ref }}
+      LAB_REPOSITORY: ${{ inputs.lab_repository }}
+      LAB_REF: ${{ inputs.lab_ref }}
+      LAB_SCENARIOS: ${{ inputs.lab_scenarios }}
+      COORDINATOR_INSTANCE_TYPE: ${{ inputs.coordinator_instance_type }}
+      AGENT_INSTANCE_TYPE: ${{ inputs.agent_instance_type }}
+      NETA_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/neta-full-cycle-report
+
+    steps:
+      - name: Validate AWS configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_REGION NETA_AWS_ROLE_ARN NETA_AWS_VPC_ID NETA_AWS_SUBNET_ID NETA_AWS_AMI_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing repository variable: $name" >&2
+              exit 2
+            fi
+          done
+
+      - name: Obtain short-lived AWS credentials through GitHub OIDC
+        shell: bash
+        run: |
+          set -euo pipefail
+          token_json="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
+          web_identity_token="$(jq -r '.value' <<<"$token_json")"
+          [[ -n "$web_identity_token" && "$web_identity_token" != null ]]
+          creds="$(aws sts assume-role-with-web-identity \
+            --region "$AWS_REGION" \
+            --role-arn "$NETA_AWS_ROLE_ARN" \
+            --role-session-name "neta-full-cycle-${GITHUB_RUN_ID}" \
+            --web-identity-token "$web_identity_token" \
+            --duration-seconds 7200 \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+          read -r access secret session <<<"$creds"
+          {
+            echo "AWS_ACCESS_KEY_ID=$access"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_SESSION_TOKEN=$session"
+          } >> "$GITHUB_ENV"
+          unset web_identity_token token_json creds access secret session
+
+      - name: Checkout orchestration source at workflow commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q orchestrator
+          git -C orchestrator remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -C orchestrator fetch --depth=1 origin "$GITHUB_SHA"
+          git -C orchestrator checkout -q --detach FETCH_HEAD
+
+      - name: Run full-cycle acceptance
+        shell: bash
+        run: bash orchestrator/integration/aws/full-cycle.sh
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neta-full-cycle-linux-${{ github.run_id }}
+          path: neta-full-cycle-report/
+          if-no-files-found: warn
+          retention-days: 14
