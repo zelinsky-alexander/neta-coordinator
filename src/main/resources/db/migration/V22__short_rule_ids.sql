@@ -22,6 +22,14 @@ SET rule_id = CASE
     END
 WHERE rule_id IS NOT NULL;
 
+UPDATE finding_suppressions
+SET rule_id = CASE
+        WHEN rule_id LIKE 'NETA-%' THEN substring(rule_id FROM 6)
+        WHEN rule_id LIKE 'CUS-%' THEN 'CST-' || substring(rule_id FROM 5)
+        ELSE rule_id
+    END
+WHERE rule_id IS NOT NULL;
+
 UPDATE finding_feedback
 SET rule_id = CASE
         WHEN rule_id LIKE 'NETA-%' THEN substring(rule_id FROM 6)
@@ -46,7 +54,7 @@ SET rule_id = CASE
 WHERE rule_id IS NOT NULL;
 
 -- Existing published bundles contain the old identifiers and their SHA-256 covers those exact bytes.
--- Supersede them instead of mutating signed/hashed historical policy material. RuleSetBootstrap will publish
+-- Supersede them instead of mutating hashed historical policy material. RuleSetBootstrap will publish
 -- a fresh short-ID bundle from the migrated catalog at startup.
 UPDATE rule_sets SET status='SUPERSEDED' WHERE status='ACTIVE';
 UPDATE agent_rule_state
