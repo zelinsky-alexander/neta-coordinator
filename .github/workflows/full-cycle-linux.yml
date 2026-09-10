@@ -24,7 +24,7 @@ on:
         required: true
         default: zelinsky-alexander/neta-agent
       agent_ref:
-        description: Agent branch, tag, or commit
+        description: Agent branch, tag, or commit; an immutable dev package must already exist for the resolved commit
         required: true
         default: main
       lab_repository:
@@ -40,9 +40,9 @@ on:
         required: true
         default: all
       coordinator_instance_type:
-        description: Temporary coordinator EC2 instance type
+        description: Temporary coordinator+PostgreSQL+portal EC2 instance type
         required: true
-        default: t3.medium
+        default: t3.small
       agent_instance_type:
         description: Temporary Linux endpoint EC2 instance type
         required: true
