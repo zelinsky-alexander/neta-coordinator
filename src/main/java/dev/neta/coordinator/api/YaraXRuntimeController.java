@@ -97,7 +97,7 @@ public class YaraXRuntimeController {
         int percent = ((Number) desired.get("rollout_percent")).intValue();
         var release = jdbc.queryForMap("SELECT version,release_base_url,priority,x86_64_sha256,arm64_sha256 FROM yarax_runtime_releases WHERE version=?", target);
         String priority = (String) release.get("priority");
-        boolean selected = priority.equals("EMERGENCY") || percent >= 100 || cohort(agentId) < percent;
+        boolean selected = percent >= 100 || cohort(agentId) < percent;
         if (!selected) return new AgentRuntime(agentId, false, target, null, null, priority, percent);
         String arch = jdbc.queryForObject("SELECT agent_arch FROM agents WHERE agent_id=?", String.class, agentId);
         if (arch == null || arch.isBlank()) return new AgentRuntime(agentId, false, target, null, null, priority, percent);
