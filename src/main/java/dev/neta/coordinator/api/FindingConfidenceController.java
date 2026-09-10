@@ -2,6 +2,7 @@ package dev.neta.coordinator.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.math.BigDecimal;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -32,13 +33,17 @@ public class FindingConfidenceController {
                 rs.getString("finding_id"),
                 rs.getString("rule_id"),
                 rs.getString("severity"),
-                rs.getObject("confidence_score", Double.class),
+                confidence(rs.getBigDecimal("confidence_score")),
                 rs.getString("confidence_level"),
                 rs.getInt("corroboration_count"),
                 json(rs.getString("corroborated_by")),
                 json(rs.getString("confidence_reasons"))), findingId);
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"finding not found");
         return rows.getFirst();
+    }
+
+    private static Double confidence(BigDecimal value) {
+        return value == null ? null : value.doubleValue();
     }
 
     private JsonNode json(String value) {
