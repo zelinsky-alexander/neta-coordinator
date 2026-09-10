@@ -23,11 +23,19 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+/**
+ * RM3.2 explicit finding-resolution API.
+ *
+ * Dismiss closes only the current finding. Exact suppression is intentionally
+ * left on the legacy /finding-suppress endpoint. False-positive tuning records
+ * analyst feedback and may stage a policy proposal, but does not create an
+ * exact suppression as a side effect.
+ */
 @RestController
 @RequestMapping("/api/v1/operator")
-public class FindingDispositionController {
+public class FindingResolutionController {
     private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
-    private static final Set<String> TUNING_SCOPES = Set.of("EXACT", "ENDPOINT", "GROUP", "GLOBAL");
+    private static final Set<String> TUNING_SCOPES = Set.of("ENDPOINT", "GROUP", "GLOBAL");
     private static final Set<String> TUNING_ACTIONS = Set.of("NONE", "PROPOSE_RULE_EXCLUSION", "PROPOSE_BASELINE");
 
     private final JdbcTemplate jdbc;
@@ -35,53 +43,73 @@ public class FindingDispositionController {
     private final IncidentService incidents;
     private final String adminToken;
 
-    public FindingDispositionController(JdbcTemplate jdbc,
-                                        ObjectMapper mapper,
-                                        IncidentService incidents,
-                                        @Value("${NETA_OPERATOR_ADMIN_TOKEN:}") String adminToken) {
+    public FindingResolutionController(JdbcTemplate jdbc,
+                                       ObjectMapper mapper,
+                                       IncidentService incidents,
+                                       @Value("${NETA_OPERATOR_ADMIN_TOKEN:}") String adminToken) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.incidents = incidents;
         this.adminToken = adminToken == null ? "" : adminToken;
     }
 
-    @PostMapping(value = "/finding-suppress", produces = MediaType.TEXT_PLAIN_VALUE)
+    @PostMapping(value = "/finding-dismiss", produces = MediaType.TEXT_PLAIN_VALUE)
     @Transactional
-    public String suppress(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
-                           @RequestParam("id") String findingId,
-                           @RequestParam("reason") String reason) {
-        return dispose(suppliedToken, findingId, reason, "SUPPRESSED", "FINDING_SUPPRESSED", "EXACT", "NONE");
-    }
-
-    @PostMapping(value = "/finding-false-positive", produces = MediaType.TEXT_PLAIN_VALUE)
-    @Transactional
-    public String falsePositive(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
-                                @RequestParam("id") String findingId,
-                                @RequestParam("reason") String reason,
-                                @RequestParam(value = "scope", defaultValue = "EXACT") String scope,
-                                @RequestParam(value = "action", defaultValue = "NONE") String action) {
-        return dispose(suppliedToken, findingId, reason, "FALSE_POSITIVE", "FINDING_FALSE_POSITIVE",
-                normalized(scope, TUNING_SCOPES, "unsupported false-positive scope"),
-                normalized(action, TUNING_ACTIONS, "unsupported false-positive tuning action"));
-    }
-
-    private String dispose(String suppliedToken, String findingId, String reason,
-                           String disposition, String auditEvent, String scope, String action) {
+    public String dismiss(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                          @RequestParam("id") String findingId,
+                          @RequestParam("reason") String reason) {
         requireAdmin(suppliedToken);
+        FindingRef finding = loadFinding(findingId, reason);
+        List<String> incidentIds = incidentIds(finding.findingId());
+        removeActiveFinding(finding.findingId());
+        audit("FINDING_DISMISSED", finding, reason, "DISMISSED", null, null, null, incidentIds);
+        return "Dismissed finding " + finding.findingId()
+                + ". No suppression or detection-policy change was created; the same behavior may alert again.\n";
+    }
+
+    @PostMapping(value = "/finding-tune", produces = MediaType.TEXT_PLAIN_VALUE)
+    @Transactional
+    public String tune(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                       @RequestParam("id") String findingId,
+                       @RequestParam("reason") String reason,
+                       @RequestParam(value = "scope", defaultValue = "ENDPOINT") String requestedScope,
+                       @RequestParam(value = "action", defaultValue = "NONE") String requestedAction) {
+        requireAdmin(suppliedToken);
+        String scope = normalized(requestedScope, TUNING_SCOPES, "unsupported false-positive scope");
+        String action = normalized(requestedAction, TUNING_ACTIONS, "unsupported false-positive tuning action");
+        if ("GROUP".equals(scope) && !"NONE".equals(action)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "group-scoped tuning requires endpoint-group identity support from a later RM3 slice");
+        }
+
+        FindingRef finding = loadFinding(findingId, reason);
+        List<String> incidentIds = incidentIds(finding.findingId());
+        long feedbackId = recordFeedback(finding, reason, scope, action);
+        if ("PROPOSE_RULE_EXCLUSION".equals(action)) {
+            stageRuleExclusion(finding, reason, scope, feedbackId);
+        } else if ("PROPOSE_BASELINE".equals(action)) {
+            stageBaselineCandidate(finding, feedbackId);
+        }
+
+        removeActiveFinding(finding.findingId());
+        audit("FINDING_FALSE_POSITIVE_TUNED", finding, reason, "FALSE_POSITIVE",
+                scope, action, feedbackId, incidentIds);
+
+        String proposal = "NONE".equals(action)
+                ? " No policy proposal was created."
+                : " A " + action + " proposal was staged for " + scope
+                    + " scope and is not active until explicitly approved/published.";
+        return "Marked finding " + finding.findingId()
+                + " as false positive and retained analyst feedback. No exact suppression was created."
+                + proposal + "\n";
+    }
+
+    private FindingRef loadFinding(String findingId, String reason) {
         requireText(findingId, "finding id is required");
         requireText(reason, "reason is required");
         if (reason.length() > 1000) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "reason must be at most 1000 characters");
         }
-        if ("GROUP".equals(scope) && !"NONE".equals(action)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "group-scoped tuning requires endpoint-group identity support from a later RM3 slice");
-        }
-        if ("EXACT".equals(scope) && !"NONE".equals(action)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "exact scope is suppression-only; choose endpoint or global scope for a tuning proposal");
-        }
-
         List<FindingRef> rows = jdbc.query("""
                 SELECT finding_id,finding_key,agent_id,rule_id,subject_type,subject_id,
                        target_host,target_port,severity,changes::text
@@ -92,51 +120,20 @@ public class FindingDispositionController {
                 rs.getString("target_host"), rs.getObject("target_port", Integer.class), rs.getString("severity"),
                 rs.getString("changes")), findingId);
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "finding not found");
-        FindingRef finding = rows.getFirst();
+        return rows.getFirst();
+    }
 
-        List<String> incidentIds = jdbc.query(
-                "SELECT incident_id FROM incident_findings WHERE finding_id=?",
-                (rs, n) -> rs.getString(1), finding.findingId());
+    private List<String> incidentIds(String findingId) {
+        return jdbc.query("SELECT incident_id FROM incident_findings WHERE finding_id=?",
+                (rs, n) -> rs.getString(1), findingId);
+    }
 
-        Long feedbackId = null;
-        if ("FALSE_POSITIVE".equals(disposition)) {
-            feedbackId = recordFeedback(finding, reason, scope, action);
-            if ("PROPOSE_RULE_EXCLUSION".equals(action)) {
-                stageRuleExclusion(finding, reason, scope, feedbackId);
-            } else if ("PROPOSE_BASELINE".equals(action)) {
-                stageBaselineCandidate(finding, feedbackId);
-            }
-        }
-
-        jdbc.update("""
-                INSERT INTO finding_suppressions(agent_id,finding_key,disposition,reason,rule_id,subject_type,subject_id)
-                VALUES (?,?,?,?,?,?,?)
-                ON CONFLICT (agent_id,finding_key) DO UPDATE SET
-                    disposition=EXCLUDED.disposition,
-                    reason=EXCLUDED.reason,
-                    rule_id=EXCLUDED.rule_id,
-                    subject_type=EXCLUDED.subject_type,
-                    subject_id=EXCLUDED.subject_id,
-                    created_at=now()
-                """, finding.agentId(), finding.findingKey(), disposition, reason,
-                finding.ruleId(), finding.subjectType(), finding.subjectId());
-
-        jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?", finding.findingId());
-        jdbc.update("DELETE FROM incident_findings WHERE finding_id=?", finding.findingId());
-        jdbc.update("DELETE FROM findings WHERE finding_id=?", finding.findingId());
+    private void removeActiveFinding(String findingId) {
+        jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?", findingId);
+        jdbc.update("DELETE FROM incident_findings WHERE finding_id=?", findingId);
+        jdbc.update("DELETE FROM findings WHERE finding_id=?", findingId);
         jdbc.update("DELETE FROM incidents i WHERE NOT EXISTS (SELECT 1 FROM incident_findings m WHERE m.incident_id=i.incident_id)");
         incidents.syncAll();
-
-        audit(auditEvent, finding, reason, disposition, incidentIds, scope, action, feedbackId);
-        if (disposition.equals("FALSE_POSITIVE")) {
-            String proposal = "NONE".equals(action)
-                    ? " No detection-policy change was requested."
-                    : " A " + action + " proposal was staged for " + scope + " scope; it is not active policy until explicitly approved/published.";
-            return "Marked finding " + finding.findingId()
-                    + " as FALSE_POSITIVE, retained RM3 analyst feedback, and removed it from active coordinator findings."
-                    + proposal + "\n";
-        }
-        return "Suppressed finding " + finding.findingId() + " and removed it from active coordinator findings.\n";
     }
 
     private long recordFeedback(FindingRef finding, String reason, String scope, String action) {
@@ -148,14 +145,14 @@ public class FindingDispositionController {
         String parentImage = changeValue(finding.changes(), "Parent image:");
         if (processImage != null) context.put("process_image", processImage);
         if (parentImage != null) context.put("parent_image", parentImage);
-        String canonicalRule = canonicalRuleId(finding.ruleId());
         Long id = jdbc.queryForObject("""
                 INSERT INTO finding_feedback(finding_id_snapshot,agent_id,finding_key,rule_id,subject_type,subject_id,
                                              feedback_type,requested_scope,requested_action,reason,context_json)
                 VALUES (?,?,?,?,?,?,'FALSE_POSITIVE',?,?,?,?::jsonb)
                 RETURNING feedback_id
-                """, Long.class, finding.findingId(), finding.agentId(), finding.findingKey(), canonicalRule,
-                finding.subjectType(), finding.subjectId(), scope, action, reason, write(context));
+                """, Long.class, finding.findingId(), finding.agentId(), finding.findingKey(),
+                canonicalRuleId(finding.ruleId()), finding.subjectType(), finding.subjectId(), scope, action,
+                reason, write(context));
         if (id == null) throw new IllegalStateException("failed to persist false-positive feedback");
         return id;
     }
@@ -205,36 +202,32 @@ public class FindingDispositionController {
         String key = (parent == null ? "" : parent) + "->" + process;
         jdbc.update("""
                 INSERT INTO baseline_candidates(agent_id,rule_id,candidate_type,candidate_key,evidence_json)
-                VALUES (?,?, 'PROCESS_PARENT_CHILD', ?, ?::jsonb)
+                VALUES (?,?,'PROCESS_PARENT_CHILD',?,?::jsonb)
                 ON CONFLICT(agent_id,candidate_type,candidate_key) DO UPDATE SET
                     observation_count=baseline_candidates.observation_count+1,
                     last_seen=now(), evidence_json=EXCLUDED.evidence_json
                 """, finding.agentId(), canonicalRuleId(finding.ruleId()), key, write(evidence));
     }
 
-    private void audit(String eventType, FindingRef finding, String reason,
-                       String disposition, List<String> incidentIds,
-                       String scope, String action, Long feedbackId) {
+    private void audit(String eventType, FindingRef finding, String reason, String disposition,
+                       String scope, String action, Long feedbackId, List<String> incidentIds) {
         try {
             Map<String, Object> details = new LinkedHashMap<>();
             details.put("finding_id", finding.findingId());
             details.put("finding_key", finding.findingKey());
             details.put("disposition", disposition);
             details.put("reason", reason);
-            details.put("requested_scope", scope);
-            details.put("requested_action", action);
+            if (scope != null) details.put("requested_scope", scope);
+            if (action != null) details.put("requested_action", action);
             if (feedbackId != null) details.put("feedback_id", feedbackId);
             if (finding.ruleId() != null) details.put("rule_id", canonicalRuleId(finding.ruleId()));
             if (finding.subjectType() != null) details.put("subject_type", finding.subjectType());
             if (finding.subjectId() != null) details.put("subject_id", finding.subjectId());
-            if (finding.targetHost() != null) details.put("target_host", finding.targetHost());
-            if (finding.targetPort() != null) details.put("target_port", finding.targetPort());
-            if (finding.severity() != null) details.put("severity", finding.severity());
             if (!incidentIds.isEmpty()) details.put("former_incidents", incidentIds);
             jdbc.update("INSERT INTO audit_events(event_type,agent_id,details) VALUES (?,?,CAST(? AS jsonb))",
                     eventType, finding.agentId(), mapper.writeValueAsString(details));
         } catch (Exception e) {
-            throw new IllegalStateException("failed to record finding disposition audit event", e);
+            throw new IllegalStateException("failed to record finding resolution audit event", e);
         }
     }
 
