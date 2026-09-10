@@ -119,18 +119,18 @@ public class PlatformProfileService {
         return switch (profile) {
             case "base" -> List.of();
             case "linux-server" -> List.of(
-                    patch("NETA-PROC-004", Map.of("child_count", 10), Map.of()),
-                    patch("NETA-PROC-005", Map.of("child_count", 10), Map.of()));
+                    patch("PROC-004", Map.of("child_count", 10), Map.of()),
+                    patch("PROC-005", Map.of("child_count", 10), Map.of()));
             case "linux-desktop" -> List.of(
-                    patch("NETA-PROC-004", Map.of("child_count", 12), Map.of()),
-                    patch("NETA-PROC-005", Map.of("child_count", 12), Map.of()));
+                    patch("PROC-004", Map.of("child_count", 12), Map.of()),
+                    patch("PROC-005", Map.of("child_count", 12), Map.of()));
             case "wsl" -> List.of(
-                    patch("NETA-PROC-002", Map.of(), Map.of("parent_process_names", List.of("wsl-pro-service"))),
-                    patch("NETA-PROC-004", Map.of("child_count", 12), Map.of()),
-                    patch("NETA-PROC-005", Map.of("child_count", 12), Map.of()));
+                    patch("PROC-002", Map.of(), Map.of("parent_process_names", List.of("wsl-pro-service"))),
+                    patch("PROC-004", Map.of("child_count", 12), Map.of()),
+                    patch("PROC-005", Map.of("child_count", 12), Map.of()));
             case "windows" -> List.of(
-                    patch("NETA-PROC-004", Map.of("child_count", 12), Map.of()),
-                    patch("NETA-PROC-005", Map.of("child_count", 12), Map.of()));
+                    patch("PROC-004", Map.of("child_count", 12), Map.of()),
+                    patch("PROC-005", Map.of("child_count", 12), Map.of()));
             default -> throw new IllegalArgumentException("unsupported platform profile: " + profile);
         };
     }
