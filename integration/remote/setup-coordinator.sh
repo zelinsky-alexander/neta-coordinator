@@ -138,7 +138,7 @@ install -m 0644 "$PKI/portal-client.crt" "$PORTAL/secrets/portal-client-cert.pem
 install -m 0600 "$PKI/portal-client.key" "$PORTAL/secrets/portal-client-key.pem"
 # A syntactically valid one-off account is sufficient for health/session validation;
 # the full-cycle suite never logs in or persists this credential.
-PORTAL_HASH="scrypt$$(openssl rand -hex 16)$$(openssl rand -hex 32)"
+PORTAL_HASH="scrypt\$$(openssl rand -hex 16)\$$(openssl rand -hex 32)"
 cat >"$PORTAL/.env" <<EOF
 NETA_COORDINATOR_URL=https://${COORDINATOR_PRIVATE_IP}:8443
 NETA_COORDINATOR_REQUEST_TIMEOUT_MS=5000
@@ -150,7 +150,7 @@ NETA_COORDINATOR_CLIENT_CERT_FILE=/run/secrets/portal-client-cert.pem
 NETA_COORDINATOR_CLIENT_KEY_FILE=/run/secrets/portal-client-key.pem
 NETA_COORDINATOR_ALLOW_INSECURE_HTTP=false
 NETA_PORTAL_LEGACY_OPERATOR_API=false
-NETA_PORTAL_USERS_JSON=[{"username":"acceptance","passwordHash":"$PORTAL_HASH","role":"ADMIN"}]
+NETA_PORTAL_USERS_JSON='[{"username":"acceptance","passwordHash":"$PORTAL_HASH","role":"ADMIN"}]'
 NETA_PORTAL_SESSION_SECRET=$PORTAL_SESSION_SECRET
 NETA_PORTAL_SESSION_TTL_SECONDS=3600
 EOF
