@@ -163,7 +163,7 @@ public class FindingResolutionController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "finding does not expose a rule id that can be tuned");
         }
         ObjectNode patch = mapper.createObjectNode();
-        if ("NETA-PROC-002".equals(canonicalRule)) {
+        if ("PROC-002".equals(canonicalRule)) {
             String parent = leaf(changeValue(finding.changes(), "Parent image:"));
             if (parent == null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -258,13 +258,15 @@ public class FindingResolutionController {
 
     private static String canonicalRuleId(String ruleId) {
         if (ruleId == null || ruleId.isBlank()) return ruleId;
-        return switch (ruleId) {
-            case "PROCESS_EXEC_FROM_TRANSIENT_PATH" -> "NETA-PROC-001";
-            case "PROCESS_SHELL_FROM_UNEXPECTED_PARENT" -> "NETA-PROC-002";
-            case "PROCESS_UNEXPECTED_ELEVATION" -> "NETA-PROC-003";
-            case "PROCESS_RAPID_CHILD_FANOUT" -> "NETA-PROC-004";
-            case "PROCESS_SHORT_LIVED_BURST" -> "NETA-PROC-005";
-            default -> ruleId;
+        String shortId = ruleId.startsWith("NETA-") ? ruleId.substring(5) : ruleId;
+        if (shortId.startsWith("CUS-")) shortId = "CST-" + shortId.substring(4);
+        return switch (shortId) {
+            case "PROCESS_EXEC_FROM_TRANSIENT_PATH" -> "PROC-001";
+            case "PROCESS_SHELL_FROM_UNEXPECTED_PARENT" -> "PROC-002";
+            case "PROCESS_UNEXPECTED_ELEVATION" -> "PROC-003";
+            case "PROCESS_RAPID_CHILD_FANOUT" -> "PROC-004";
+            case "PROCESS_SHORT_LIVED_BURST" -> "PROC-005";
+            default -> shortId;
         };
     }
 
