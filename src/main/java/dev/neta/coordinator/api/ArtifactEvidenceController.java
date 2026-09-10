@@ -41,8 +41,8 @@ public class ArtifactEvidenceController {
                        e.observation_count
                   FROM artifact_evidence e
                   JOIN agents a ON a.agent_id=e.agent_id
-                 WHERE (? IS NULL OR e.agent_id=?)
-                   AND (? IS NULL OR upper(e.scan_state)=?)
+                 WHERE (CAST(? AS text) IS NULL OR e.agent_id=CAST(? AS text))
+                   AND (CAST(? AS text) IS NULL OR upper(e.scan_state)=CAST(? AS text))
                  ORDER BY e.last_seen DESC,e.evidence_id DESC
                  LIMIT ?
                 """;
