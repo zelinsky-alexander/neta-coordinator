@@ -31,7 +31,7 @@ import org.springframework.web.server.ResponseStatusException;
 public class BaselineReviewController {
     private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
     private static final Set<String> CONNECTION_ENGINE_PREFIXES = Set.of(
-            "NETA-BEH-", "NETA-NET-", "NETA-DNS-", "NETA-TLS-", "NETA-ROUTE-");
+            "BEH-", "NET-", "DNS-", "TLS-", "ROUTE-");
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
@@ -165,7 +165,7 @@ public class BaselineReviewController {
     private ObjectNode approvedExclusion(Candidate candidate, String engine) {
         ObjectNode patch = json.createObjectNode();
         if ("PROCESS_PARENT_CHILD".equals(candidate.candidateType())) {
-            if (!"NETA-PROC-002".equals(engine))
+            if (!"PROC-002".equals(engine))
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "process parent/child baselines are promoted only for the shell-parent evaluator");
             String parentImage = text(candidate.evidence(), "parent_image");
