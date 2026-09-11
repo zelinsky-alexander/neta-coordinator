@@ -114,9 +114,17 @@ public class FindingBulkController {
 
     private Map<String, Long> grouped(Filter filter, String expression) {
         Map<String, Long> result = new LinkedHashMap<>();
-        jdbc.query("SELECT " + expression + " bucket,count(*) total FROM findings f JOIN agents a ON a.agent_id=f.agent_id "
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT " + expression + " bucket,count(*) total FROM findings f JOIN agents a ON a.agent_id=f.agent_id "
                         + filter.where() + " GROUP BY bucket ORDER BY total DESC,bucket LIMIT 20",
-                rs -> result.put(rs.getString("bucket"), rs.getLong("total")), filter.args().toArray());
+                filter.args().toArray());
+        for (Map<String, Object> row : rows) {
+            Object bucket = row.get("bucket");
+            Object total = row.get("total");
+            if (bucket != null && total instanceof Number number) {
+                result.put(bucket.toString(), number.longValue());
+            }
+        }
         return result;
     }
 
