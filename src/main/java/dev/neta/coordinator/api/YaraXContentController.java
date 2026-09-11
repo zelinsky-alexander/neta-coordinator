@@ -42,13 +42,26 @@ public class YaraXContentController {
         requireAdmin(token);
         var desired = jdbc.queryForMap("SELECT target_bundle_id,previous_bundle_id,rollout_percent,updated_by,updated_at FROM yarax_content_desired WHERE singleton=1");
         var bundles = jdbc.queryForList("SELECT bundle_id,revision,sha256,content_bytes,status,created_by,created_at,activated_at FROM yarax_content_bundles ORDER BY revision DESC LIMIT 50");
+        String target = (String) desired.get("target_bundle_id");
+        int percent = ((Number) desired.get("rollout_percent")).intValue();
         var agents = jdbc.queryForList("""
             SELECT a.agent_id,a.display_name,a.agent_os AS platform,a.agent_arch AS arch,
                    s.installed_bundle_id,s.active_bundle_id,s.active_revision,s.active_sha256,
-                   s.desired_bundle_id,COALESCE(s.state,'UNKNOWN') AS state,s.error,s.last_ack_at,s.updated_at
-              FROM agents a LEFT JOIN yarax_content_agent_state s ON s.agent_id=a.agent_id
+                   s.desired_bundle_id,COALESCE(s.state,'UNKNOWN') AS state,s.error,s.last_ack_at,s.updated_at,
+                   CASE WHEN c.agent_id IS NULL THEN false ELSE true END AS explicit_canary
+              FROM agents a
+              LEFT JOIN yarax_content_agent_state s ON s.agent_id=a.agent_id
+              LEFT JOIN yarax_content_canary_targets c ON c.agent_id=a.agent_id AND c.bundle_id=?
              WHERE a.status='ACTIVE' ORDER BY a.display_name,a.agent_id
-            """);
+            """, target);
+        for (var agent : agents) {
+            String agentId = (String) agent.get("agent_id");
+            boolean explicit = Boolean.TRUE.equals(agent.get("explicit_canary"));
+            boolean selected = target != null && (explicit || percent >= 100 || cohort(agentId) < percent);
+            agent.put("selected", selected);
+            agent.put("effective_desired_bundle_id", selected ? target : null);
+            agent.put("cohort", cohort(agentId));
+        }
         return Map.of("desired", desired, "bundles", bundles, "agents", agents);
     }
 
@@ -98,6 +111,31 @@ public class YaraXContentController {
         return Map.of("accepted", true, "bundleId", bundleId, "rolloutPercent", request.rolloutPercent());
     }
 
+    @PostMapping("/operator/yarax/content/canary")
+    public Map<String,Object> canary(@RequestHeader(value = ADMIN_HEADER, required = false) String token,
+                                     @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
+                                     @RequestBody CanaryRequest request) {
+        requireAdmin(token);
+        String bundleId = required(request.bundleId(), "bundleId");
+        String agentId = required(request.agentId(), "agentId");
+        Integer bundleExists = jdbc.queryForObject("SELECT count(*) FROM yarax_content_bundles WHERE bundle_id=?", Integer.class, bundleId);
+        if (bundleExists == null || bundleExists == 0) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "unknown YARA content bundle");
+        Integer agentExists = jdbc.queryForObject("SELECT count(*) FROM agents WHERE agent_id=? AND status='ACTIVE'", Integer.class, agentId);
+        if (agentExists == null || agentExists == 0) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "unknown active endpoint");
+        String currentTarget = jdbc.queryForObject("SELECT target_bundle_id FROM yarax_content_desired WHERE singleton=1", String.class);
+        if (!bundleId.equals(currentTarget)) bad("explicit canary target must use the current desired bundle");
+        String by = actor == null || actor.isBlank() ? "operator" : actor;
+        if (request.enabled()) {
+            jdbc.update("""
+                INSERT INTO yarax_content_canary_targets(agent_id,bundle_id,created_by,created_at)
+                VALUES (?,?,?,now()) ON CONFLICT(agent_id) DO UPDATE SET bundle_id=excluded.bundle_id,created_by=excluded.created_by,created_at=now()
+                """, agentId, bundleId, by);
+        } else {
+            jdbc.update("DELETE FROM yarax_content_canary_targets WHERE agent_id=? AND bundle_id=?", agentId, bundleId);
+        }
+        return Map.of("accepted", true, "bundleId", bundleId, "agentId", agentId, "enabled", request.enabled());
+    }
+
     @PostMapping(value="/agent/yarax/content/fetch", produces=MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> fetch(HttpServletRequest request) {
         String agentId = authenticatedAgent(request);
@@ -105,7 +143,9 @@ public class YaraXContentController {
         String target = (String) desired.get("target_bundle_id");
         if (target == null) return ResponseEntity.noContent().build();
         int percent = ((Number) desired.get("rollout_percent")).intValue();
-        boolean selected = percent >= 100 || cohort(agentId) < percent;
+        Integer explicitCount = jdbc.queryForObject("SELECT count(*) FROM yarax_content_canary_targets WHERE agent_id=? AND bundle_id=?", Integer.class, agentId, target);
+        boolean explicit = explicitCount != null && explicitCount > 0;
+        boolean selected = explicit || percent >= 100 || cohort(agentId) < percent;
         if (!selected) return ResponseEntity.noContent().build();
 
         String os = jdbc.queryForObject("SELECT agent_os FROM agents WHERE agent_id=?", String.class, agentId);
@@ -172,6 +212,7 @@ public class YaraXContentController {
         if (percent < 0 || percent > 100) bad("rolloutPercent must be between 0 and 100");
         jdbc.update("UPDATE yarax_content_bundles SET status=CASE WHEN bundle_id=? THEN 'ACTIVE' WHEN status='ACTIVE' THEN 'AVAILABLE' ELSE status END,activated_at=CASE WHEN bundle_id=? THEN now() ELSE activated_at END", bundleId,bundleId);
         jdbc.update("UPDATE yarax_content_desired SET previous_bundle_id=CASE WHEN target_bundle_id IS DISTINCT FROM ? THEN target_bundle_id ELSE previous_bundle_id END,target_bundle_id=?,rollout_percent=?,updated_by=?,updated_at=now() WHERE singleton=1", bundleId,bundleId,percent,actor);
+        jdbc.update("DELETE FROM yarax_content_canary_targets WHERE bundle_id<>?", bundleId);
     }
 
     private String authenticatedAgent(HttpServletRequest request) {
@@ -197,6 +238,7 @@ public class YaraXContentController {
 
     public record PublishRequest(String bundleId,String content,Integer rolloutPercent) {}
     public record RolloutRequest(String bundleId,int rolloutPercent) {}
+    public record CanaryRequest(String bundleId,String agentId,boolean enabled) {}
     public record AckRequest(String bundleId,Long revision,String sha256,String state,String error) {}
     private record Existing(long revision,String sha256) {}
 }
