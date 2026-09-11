@@ -121,7 +121,10 @@ public class PortalReadApiController {
                                       @RequestParam(required=false) String trust,
                                       @RequestParam(required=false) String performance,
                                       @RequestParam(required=false) String status,
-                                      @RequestParam(required=false) String target) {
+                                      @RequestParam(required=false) String target,
+                                      @RequestParam(required=false) String severity,
+                                      @RequestParam(required=false) String rule,
+                                      @RequestParam(required=false) Long olderThanSeconds) {
         int bounded = bounded(limit);
         List<Object> args = new ArrayList<>();
         StringBuilder where = new StringBuilder(" WHERE 1=1");
@@ -129,7 +132,13 @@ public class PortalReadApiController {
         if (text(trust)) { where.append(" AND upper(COALESCE(f.trust_verdict,''))=upper(?)"); args.add(trust); }
         if (text(performance)) { where.append(" AND upper(COALESCE(f.performance_verdict,''))=upper(?)"); args.add(performance); }
         if (text(status)) { where.append(" AND upper(COALESCE(f.status,''))=upper(?)"); args.add(status); }
-        if (text(target)) { where.append(" AND lower(f.target_host || ':' || f.target_port)=lower(?)"); args.add(target); }
+        if (text(target)) { where.append(" AND lower(COALESCE(f.target_host,'') || ':' || COALESCE(f.target_port::text,''))=lower(?)"); args.add(target); }
+        if (text(severity)) { where.append(" AND upper(COALESCE(f.severity,''))=upper(?)"); args.add(severity); }
+        if (text(rule)) { where.append(" AND upper(COALESCE(f.rule_id,''))=upper(?)"); args.add(rule); }
+        if (olderThanSeconds != null) {
+            if (olderThanSeconds <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"olderThanSeconds must be positive");
+            where.append(" AND f.last_seen < now() - (? * interval '1 second')"); args.add(olderThanSeconds);
+        }
         Cursor c = decode(cursor);
         if (c != null) { where.append(" AND (f.last_seen,f.finding_id) < (?,?)"); args.add(Timestamp.from(Instant.parse(c.value()))); args.add(c.id()); }
         args.add(bounded + 1);
@@ -219,7 +228,7 @@ public class PortalReadApiController {
                                     String trust,String performance,long count,String status,Instant firstSeen,
                                     Instant lastSeen,String incidentId,String changes) {
         boolean process = "PROCESS".equalsIgnoreCase(subjectType);
-        String type = process && text(ruleId)
+        String type = text(ruleId)
                 ? ruleId
                 : findingAttribute(changes,"Finding type:",fallbackFindingType(id));
         String severity = text(storedSeverity)
