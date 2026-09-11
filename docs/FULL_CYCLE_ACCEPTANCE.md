@@ -2,7 +2,7 @@
 
 This is the manual, destructive integration/acceptance harness for a fresh NETA deployment. It is intentionally **never triggered by push, pull request, schedule, or release**. The only workflow trigger is `workflow_dispatch`.
 
-The workflow provisions two temporary Ubuntu EC2 instances, installs a fresh coordinator/PostgreSQL/portal stack in Docker using the repository deployment path, creates an ephemeral two-day test PKI, installs an immutable prebuilt Linux agent package, enrolls it into the fleet, updates centrally managed rules, executes the Linux NETA Lab suite including two-host inbound scenarios, validates restart/reconnect behavior and a negative mTLS control, collects logs/results, and terminates the temporary EC2 resources in an `EXIT` trap.
+The workflow resolves the selected repositories to immutable commits, verifies that the selected agent commit already has the required immutable Linux package, provisions two temporary Ubuntu EC2 instances, installs a fresh coordinator/PostgreSQL/portal stack in Docker using the repository deployment path, creates an ephemeral two-day test PKI, installs the prebuilt Linux agent package, enrolls it into the fleet, updates centrally managed rules, executes the Linux NETA Lab suite including two-host inbound scenarios, validates restart/reconnect behavior and a negative mTLS control, collects logs/results, and terminates the temporary EC2 resources in an `EXIT` trap.
 
 ## Manual selections
 
@@ -17,17 +17,17 @@ Every run chooses these independently:
 
 The workflow defaults both EC2 hosts to `t3.small`, but these are editable workflow-dispatch inputs on every run. The coordinator host runs PostgreSQL, coordinator and portal; the endpoint host runs the packaged NETA agent and NETA Lab.
 
-The selected agent ref is resolved to an exact commit. The harness then requires the immutable development release `dev-<full-commit-sha>` produced by the agent `Build Supported Agent Flavors` workflow. It downloads the matching `linux/amd64` or `linux/arm64` package for the actual EC2 architecture, validates `release-manifest.json`, verifies SHA-256, and installs the package. **No C++ compilation or CMake test build occurs on the acceptance EC2 endpoint.**
+All four selected refs are resolved once on the GitHub runner and frozen to exact commit SHAs for that run. The selected agent commit must have the immutable development release `dev-<full-commit-sha>` produced by the agent `Build Supported Agent Flavors` workflow. Before any EC2 resources are created, the harness verifies `release-manifest.json`, the expected Linux package name for the AMI architecture, and package availability. The endpoint later downloads the same package and verifies its SHA-256 against the manifest before installation. **No C++ compilation or CMake test build occurs on the acceptance EC2 endpoint.**
 
-If no package exists for the selected ref, acceptance fails before enrollment with an instruction to run `Build Supported Agent Flavors` for that ref with `publish_development=true`.
+If no package exists for the selected agent commit, acceptance fails during the preflight phase before creating the temporary security group or EC2 instances.
 
-Windows-only Lab scenarios are reported as `NOT_APPLICABLE` by this Linux acceptance job. NETA-LAB-016 and NETA-LAB-017 are driven by the full-cycle orchestrator because their ground truth requires a second owned host.
+Windows-only Lab scenarios are reported as `NOT_APPLICABLE` by this Linux acceptance job. NETA-LAB-016, NETA-LAB-017, and the connected phase of NETA-LAB-018 are driven by the full-cycle orchestrator because their ground truth requires a second owned host. For NETA-LAB-018 the orchestrator preserves the required idle-listener interval before making the one controlled peer connection.
 
 ## GitHub repository variables
 
 Configure these repository variables in `neta-coordinator` before the first run:
 
-- `NETA_AWS_REGION`, for example `eu-north-1`;
+- `NETA_AWS_REGION`, for example `eu-central-1`;
 - `NETA_AWS_ROLE_ARN`, the IAM role assumed through GitHub OIDC;
 - `NETA_AWS_VPC_ID`;
 - `NETA_AWS_SUBNET_ID`, a public subnet with an Internet Gateway route;
@@ -49,7 +49,15 @@ with audience:
 sts.amazonaws.com
 ```
 
-The role trust policy should restrict the subject to the repository that owns the workflow. A baseline trust condition is:
+GitHub currently emits immutable owner/repository IDs in this repository's OIDC `sub` claim. The workflow prints only the non-secret OIDC identity claims (`iss`, `aud`, `sub`, `repository`, `ref`) before STS assumption so the trust policy can be checked without exposing the JWT.
+
+For this repository, the working any-branch subject pattern is:
+
+```text
+repo:zelinsky-alexander@34163821/neta-coordinator@1351657477:*
+```
+
+A matching trust policy is:
 
 ```json
 {
@@ -65,14 +73,14 @@ The role trust policy should restrict the subject to the repository that owns th
         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
       },
       "StringLike": {
-        "token.actions.githubusercontent.com:sub": "repo:zelinsky-alexander/neta-coordinator:*"
+        "token.actions.githubusercontent.com:sub": "repo:zelinsky-alexander@34163821/neta-coordinator@1351657477:*"
       }
     }
   }]
 }
 ```
 
-For a tighter production policy, restrict the GitHub subject further to the branch/environment from which this workflow is allowed to run.
+If GitHub changes the subject format, use the safe diagnostic claim printed by a manual run and update the trust condition to the exact repository identity rather than broadening it unnecessarily. For a tighter policy, restrict the subject further to the branch/environment from which the workflow is allowed to run.
 
 The workflow currently requests a two-hour STS session. Set the IAM role maximum session duration to at least two hours, or reduce `--duration-seconds` in the workflow if the suite is known to complete within a shorter period.
 
@@ -101,24 +109,25 @@ The harness creates one temporary security group. SSH is allowed only from the c
 
 The acceptance path covers:
 
-1. fresh EC2 provisioning and SSH bootstrap;
-2. coordinator and PostgreSQL fresh installation in Docker;
-3. ephemeral Fleet CA, coordinator server certificate, agent-issuer certificate, trust store, and portal client certificate creation;
-4. coordinator HTTPS/mTLS startup and health;
-5. portal fresh Docker installation, mTLS files, native-auth configuration and health endpoint;
-6. exact selected agent ref resolution, immutable package discovery, manifest/SHA-256 verification and runtime-only installation;
-7. agent CSR enrollment, coordinator-issued identity certificate, `AgentHello` and heartbeat;
-8. central rule-set download/validation/activation;
-9. Linux NETA Lab command suite;
-10. peer-driven inbound NETA-LAB-016 and concurrent inbound/outbound NETA-LAB-017;
-11. agent restart and authenticated heartbeat;
-12. coordinator restart and agent recovery;
-13. unauthenticated message-ingestion rejection under mTLS;
-14. post-test portal health and coordinator state collection;
-15. logs, revision SHAs, Lab summaries, JUnit XML, JSON summary and `ACCEPTANCE.md` generation;
-16. unconditional AWS resource cleanup.
+1. exact ref resolution and immutable agent-package preflight before AWS provisioning;
+2. fresh EC2 provisioning and SSH bootstrap;
+3. coordinator and PostgreSQL fresh installation in Docker;
+4. ephemeral Fleet CA, coordinator server certificate, agent-issuer certificate, Java trust store, and portal client certificate creation;
+5. coordinator HTTPS/mTLS startup and health;
+6. portal fresh Docker installation, mTLS files, native-auth configuration, production topology/security properties and health endpoint;
+7. immutable package manifest/SHA-256 verification and runtime-only Linux agent installation;
+8. agent CSR enrollment, coordinator-issued identity certificate, `AgentHello` and heartbeat;
+9. central rule-set download/validation/activation;
+10. Linux NETA Lab command suite;
+11. peer-driven NETA-LAB-016, NETA-LAB-017, and NETA-LAB-018 connected phase;
+12. agent restart and authenticated heartbeat;
+13. coordinator restart, bounded health convergence and agent recovery;
+14. application-layer client-certificate rejection using a structurally valid Heartbeat for the real enrolled agent but deliberately omitting the client certificate; acceptance requires the coordinator's `401 client certificate is required` response;
+15. post-test portal health and coordinator state collection;
+16. logs, frozen revision SHAs, production-parity evidence, Lab summaries, JUnit XML, JSON summary and `ACCEPTANCE.md` generation;
+17. unconditional AWS resource cleanup.
 
-The Lab `expected.yaml` files remain the scenario ground-truth specification. The current first integration harness treats scenario command completion plus the NETA system-level evidence/fleet checks as the automated gate; it does not invent semantic assertions when an `expected.yaml` field is not yet exposed by a stable machine-readable coordinator/agent query. Those expected files and runtime evidence should be used to extend scenario-specific assertions as the evidence query surface stabilizes.
+The Lab `expected.yaml` files remain the scenario ground-truth specification. The current integration harness treats scenario command completion plus the NETA system-level evidence/fleet checks as the automated gate; it does not invent semantic assertions when an `expected.yaml` field is not yet exposed by a stable machine-readable coordinator/agent query. Those expected files and runtime evidence should be used to extend scenario-specific assertions as the evidence query surface stabilizes.
 
 ## Agent package prerequisite
 
@@ -126,11 +135,11 @@ For the agent repository/ref you intend to test:
 
 1. open **Actions → Build Supported Agent Flavors** in that agent repository;
 2. choose the branch/ref you want to acceptance-test;
-3. run it with `publish_development=true`;
+3. run it with `publish_development=true` if that ref is not already published automatically;
 4. wait for the immutable `dev-<commit-sha>` release to be published;
 5. start the NETA full-cycle workflow and select the same agent repository/ref.
 
-For pushes to `main`, the existing packaging workflow already publishes the Linux development release automatically when its Linux package jobs are green.
+For pushes to `main`, the existing packaging workflow publishes the Linux development release automatically when its Linux package jobs are green.
 
 ## Output artifact
 
@@ -141,6 +150,7 @@ ACCEPTANCE.md
 acceptance.json
 junit.xml
 environment.txt
+production-parity.txt
 coordinator-revisions.txt
 agent-revisions.txt
 lab/summary.tsv
@@ -159,6 +169,7 @@ The harness intentionally avoids Terraform, PyYAML and cloud SDK libraries. It u
 - **OpenSSL** — Apache-2.0; ephemeral keys/certificates, package TLS runtime dependency and PKCS#12 creation; actively maintained. Test private keys are short-lived and never uploaded as artifacts.
 - **Docker Engine / Moby** — Apache-2.0; existing coordinator/portal production-style deployment runtime; actively maintained. The EC2 hosts are disposable and should use current Ubuntu security updates.
 - **Docker Compose v2** — Apache-2.0; existing deployment orchestration; actively maintained.
-- **GitHub `actions/upload-artifact@v4`** — MIT; uploads the final acceptance directory; maintained by GitHub. It is CI-only, not linked into NETA binaries. Pinning to a reviewed commit SHA can further reduce action supply-chain risk before production use.
+- **Python 3** — PSF License; standard-library-only controlled NETA Lab peer/server helpers on the disposable coordinator host. No Python package from PyPI is added by this harness.
+- **GitHub `actions/upload-artifact` v4** — MIT; CI-only artifact upload. The workflow pins the reviewed immutable commit `ea165f8d65b6e75b540449e92b4886f43607fa02` rather than a moving tag.
 
 The implementation uses standard GitHub Actions OIDC and AWS STS `AssumeRoleWithWebIdentity` interfaces rather than copied third-party provisioning code. Before commercial/public release, normal dependency/license and similarity review should still be performed as part of the project's release process.
