@@ -7,7 +7,6 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -158,7 +157,7 @@ public class FindingBulkController {
         List<Object> args = new ArrayList<>();
         StringBuilder where = new StringBuilder(" WHERE 1=1");
         if (text(agent)) {
-            where.append(" AND (f.agent_id=? OR lower(COALESCE(a.display_name,''))=lower(?))");
+            where.append(" AND (f.agent_id=? OR lower(COALESCE((SELECT ax.display_name FROM agents ax WHERE ax.agent_id=f.agent_id),''))=lower(?))");
             args.add(agent.trim());
             args.add(agent.trim());
         }
