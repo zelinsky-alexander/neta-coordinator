@@ -19,6 +19,20 @@ done
 
 compose=(docker compose --env-file .env -f docker-compose.yml -f docker-compose.mtls.yml)
 
+dump_coordinator_diagnostics() {
+  printf '%s\n' '--- coordinator compose status ---' >&2
+  "${compose[@]}" ps -a coordinator >&2 || true
+  local cid
+  cid="$("${compose[@]}" ps -aq coordinator 2>/dev/null | head -n1 || true)"
+  if [[ -n "$cid" ]]; then
+    printf '%s\n' '--- coordinator inspected environment ---' >&2
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null \
+      | grep -E '^(SPRING_PROFILES_ACTIVE|NETA_REQUIRE_CLIENT_CERTIFICATE|NETA_TLS_KEY_STORE|NETA_TLS_TRUST_STORE)=' >&2 || true
+  fi
+  printf '%s\n' '--- coordinator recent logs ---' >&2
+  "${compose[@]}" logs --tail=160 coordinator >&2 || true
+}
+
 # Fail before touching the running service if the effective Compose model does not
 # contain the mTLS override. This also catches accidental edits or invocation from
 # a checkout where the override is not being applied.
@@ -39,25 +53,45 @@ info "Updating NETA Coordinator in mTLS mode..."
 "${compose[@]}" up -d --build --force-recreate --no-deps coordinator
 
 info "Waiting for coordinator container health..."
+health=""
 for _ in {1..30}; do
   health="$("${compose[@]}" ps --format json coordinator 2>/dev/null | grep -o '"Health":"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
-  if [[ "$health" == "healthy" ]]; then
-    break
+  [[ "$health" == "healthy" ]] && break
+
+  cid="$("${compose[@]}" ps -aq coordinator 2>/dev/null | head -n1 || true)"
+  if [[ -n "$cid" ]]; then
+    running="$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null || true)"
+    restarting="$(docker inspect -f '{{.State.Restarting}}' "$cid" 2>/dev/null || true)"
+    if [[ "$running" != "true" || "$restarting" == "true" ]]; then
+      dump_coordinator_diagnostics
+      fail "coordinator exited or is restart-looping before becoming healthy"
+    fi
   fi
   sleep 2
 done
 
-profile="$("${compose[@]}" exec -T coordinator printenv SPRING_PROFILES_ACTIVE 2>/dev/null || true)"
-require_cert="$("${compose[@]}" exec -T coordinator printenv NETA_REQUIRE_CLIENT_CERTIFICATE 2>/dev/null || true)"
-key_store="$("${compose[@]}" exec -T coordinator printenv NETA_TLS_KEY_STORE 2>/dev/null || true)"
-trust_store="$("${compose[@]}" exec -T coordinator printenv NETA_TLS_TRUST_STORE 2>/dev/null || true)"
+if [[ "$health" != "healthy" ]]; then
+  dump_coordinator_diagnostics
+  fail "coordinator did not become healthy in time"
+fi
 
-[[ "$profile" == "mtls" ]] || fail "coordinator started without SPRING_PROFILES_ACTIVE=mtls"
-[[ "$require_cert" == "true" ]] || fail "coordinator started without NETA_REQUIRE_CLIENT_CERTIFICATE=true"
-[[ -n "$key_store" ]] || fail "coordinator TLS key store is not configured"
-[[ -n "$trust_store" ]] || fail "coordinator TLS trust store is not configured"
+cid="$("${compose[@]}" ps -q coordinator)"
+[[ -n "$cid" ]] || fail "coordinator container id is unavailable after health check"
+
+# Inspect the created container configuration rather than relying on `exec`.
+# This distinguishes a missing environment override from a process that exited.
+profile="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^SPRING_PROFILES_ACTIVE=//p' | head -n1)"
+require_cert="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^NETA_REQUIRE_CLIENT_CERTIFICATE=//p' | head -n1)"
+key_store="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^NETA_TLS_KEY_STORE=//p' | head -n1)"
+trust_store="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" | sed -n 's/^NETA_TLS_TRUST_STORE=//p' | head -n1)"
+
+[[ "$profile" == "mtls" ]] || { dump_coordinator_diagnostics; fail "coordinator container configuration lacks SPRING_PROFILES_ACTIVE=mtls"; }
+[[ "$require_cert" == "true" ]] || { dump_coordinator_diagnostics; fail "coordinator container configuration lacks NETA_REQUIRE_CLIENT_CERTIFICATE=true"; }
+[[ -n "$key_store" ]] || { dump_coordinator_diagnostics; fail "coordinator TLS key store is not configured"; }
+[[ -n "$trust_store" ]] || { dump_coordinator_diagnostics; fail "coordinator TLS trust store is not configured"; }
 
 if ! "${compose[@]}" logs --tail=120 coordinator 2>/dev/null | grep -Eq 'Tomcat started on port 8080 \(https\)|Tomcat initialized with port 8080 \(https\)'; then
+  dump_coordinator_diagnostics
   fail "coordinator did not report HTTPS on container port 8080"
 fi
 
