@@ -100,6 +100,18 @@ jobs:
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")"
           web_identity_token="$(jq -r '.value' <<<"$token_json")"
           [[ -n "$web_identity_token" && "$web_identity_token" != null ]]
+
+          # Safe diagnostics: decode and print only non-secret identity claims needed
+          # to validate the AWS IAM trust policy. Never print the JWT itself.
+          payload_b64="$(cut -d. -f2 <<<"$web_identity_token")"
+          case $((${#payload_b64} % 4)) in
+            2) payload_b64+="==" ;;
+            3) payload_b64+="=" ;;
+          esac
+          oidc_claims="$(printf '%s' "$payload_b64" | tr '_-' '/+' | base64 -d 2>/dev/null || true)"
+          echo "GitHub OIDC diagnostic claims:"
+          jq '{iss, aud, sub, repository, ref}' <<<"$oidc_claims"
+
           creds="$(aws sts assume-role-with-web-identity \
             --region "$AWS_REGION" \
             --role-arn "$NETA_AWS_ROLE_ARN" \
@@ -114,7 +126,7 @@ jobs:
             echo "AWS_SECRET_ACCESS_KEY=$secret"
             echo "AWS_SESSION_TOKEN=$session"
           } >> "$GITHUB_ENV"
-          unset web_identity_token token_json creds access secret session
+          unset web_identity_token token_json payload_b64 oidc_claims creds access secret session
 
       - name: Checkout orchestration source at workflow commit
         shell: bash
