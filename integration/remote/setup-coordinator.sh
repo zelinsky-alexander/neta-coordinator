@@ -82,10 +82,17 @@ chmod 0644 *.crt
 
 COORD="$SRC/coordinator"
 mkdir -p "$COORD/deploy/certs"
-install -m 0600 coordinator.p12 "$COORD/deploy/certs/coordinator.p12"
-install -m 0600 agent-issuer.p12 "$COORD/deploy/certs/agent-issuer.p12"
-install -m 0600 fleet-trust.p12 "$COORD/deploy/certs/fleet-trust.p12"
+install -m 0400 coordinator.p12 "$COORD/deploy/certs/coordinator.p12"
+install -m 0400 agent-issuer.p12 "$COORD/deploy/certs/agent-issuer.p12"
+install -m 0400 fleet-trust.p12 "$COORD/deploy/certs/fleet-trust.p12"
 install -m 0644 fleet-ca.crt "$COORD/deploy/certs/fleet-ca.crt"
+# The production coordinator image runs as numeric UID 10001. Bind-mounted
+# private stores therefore must be owned by that UID; root-owned 0600 files are
+# unreadable from the non-root container even though Docker can mount them.
+chown 10001:10001 \
+  "$COORD/deploy/certs/coordinator.p12" \
+  "$COORD/deploy/certs/agent-issuer.p12" \
+  "$COORD/deploy/certs/fleet-trust.p12"
 cat >"$COORD/.env" <<EOF
 NETA_FLEET_ID=fleet-acceptance
 NETA_DB_NAME=neta_coordinator
@@ -120,7 +127,10 @@ PORTAL="$SRC/portal"
 mkdir -p "$PORTAL/secrets"
 install -m 0644 "$PKI/fleet-ca.crt" "$PORTAL/secrets/coordinator-ca.pem"
 install -m 0644 "$PKI/portal-client.crt" "$PORTAL/secrets/portal-client-cert.pem"
-install -m 0600 "$PKI/portal-client.key" "$PORTAL/secrets/portal-client-key.pem"
+install -m 0400 "$PKI/portal-client.key" "$PORTAL/secrets/portal-client-key.pem"
+# The production portal image also runs as UID 10001, so keep its private key
+# non-world-readable while making it readable by the container process.
+chown 10001:10001 "$PORTAL/secrets/portal-client-key.pem"
 PORTAL_HASH="scrypt\$$(openssl rand -hex 16)\$$(openssl rand -hex 32)"
 cat >"$PORTAL/.env" <<EOF
 NETA_COORDINATOR_URL=https://${COORDINATOR_PRIVATE_IP}:8443
