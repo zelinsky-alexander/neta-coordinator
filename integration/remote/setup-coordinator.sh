@@ -130,8 +130,10 @@ chmod 0600 "$COORD/.env"
 cd "$COORD"
 # Use the production Compose definitions and production mTLS update path.
 docker compose --env-file .env -f docker-compose.yml up -d postgres
-./deploy/update-mtls.sh
-./deploy/health-check.sh
+# Invoke repository scripts through bash so acceptance can exercise arbitrary
+# selected refs without depending on executable-bit metadata in that ref.
+bash ./deploy/update-mtls.sh
+bash ./deploy/health-check.sh
 for _ in {1..60}; do
   if curl -fsS --cacert "$PKI/fleet-ca.crt" "https://${COORDINATOR_PRIVATE_IP}:8443/actuator/health" | grep -q '"status":"UP"'; then break; fi
   sleep 2
@@ -167,7 +169,7 @@ cd "$PORTAL"
 # Start only the production Portal service. The production cloudflared service is
 # intentionally omitted so disposable acceptance portals are never published.
 docker compose --env-file .env -f docker-compose.yml up -d --build portal
-./deploy/health-check.sh
+bash ./deploy/health-check.sh
 
 # Verify that the running topology still has the security/restart properties from
 # the selected production Compose files rather than merely checking HTTP health.
