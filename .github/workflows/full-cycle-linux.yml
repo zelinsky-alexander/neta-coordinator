@@ -146,7 +146,9 @@ jobs:
 
       - name: Upload acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact is MIT-licensed. Pin to the reviewed immutable
+        # v4 commit rather than a moving tag for acceptance-workflow supply-chain stability.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: neta-full-cycle-linux-${{ github.run_id }}
           path: neta-full-cycle-report/
