@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.neta.coordinator.api.AgentAdminController;
 import dev.neta.coordinator.api.AgentUpgradeController;
 import dev.neta.coordinator.api.CertificateOperatorController;
+import dev.neta.coordinator.api.FindingBulkController;
 import dev.neta.coordinator.api.FindingDispositionController;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -94,6 +95,10 @@ public class PortalMutationAuthorizationInterceptor implements HandlerIntercepto
             return new Required(PortalAuthorization.Role.OPERATOR, "FINDING_SUPPRESS");
         if (bean == FindingDispositionController.class && name.equals("falsePositive"))
             return new Required(PortalAuthorization.Role.OPERATOR, "FINDING_FALSE_POSITIVE");
+        if (bean == FindingBulkController.class && name.equals("resolve"))
+            return new Required(PortalAuthorization.Role.OPERATOR, "FINDINGS_BULK_RESOLVE");
+        if (bean == FindingBulkController.class && name.equals("purge"))
+            return new Required(PortalAuthorization.Role.ADMIN, "FINDINGS_BULK_PURGE");
         return null;
     }
 
