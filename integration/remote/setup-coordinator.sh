@@ -53,7 +53,10 @@ cat >coordinator.ext <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:${COORDINATOR_PRIVATE_IP},DNS:neta-coordinator
+# The selected production health-check probes the host listener via 127.0.0.1,
+# while the endpoint and portal use the EC2 private address. Cover both names in
+# this ephemeral acceptance-only certificate so hostname verification stays on.
+subjectAltName=IP:${COORDINATOR_PRIVATE_IP},IP:127.0.0.1,DNS:neta-coordinator
 EOF
 openssl x509 -req -in coordinator.csr -CA fleet-ca.crt -CAkey fleet-ca.key -CAcreateserial -days 2 -sha256 -extfile coordinator.ext -out coordinator.crt >/dev/null 2>&1
 
