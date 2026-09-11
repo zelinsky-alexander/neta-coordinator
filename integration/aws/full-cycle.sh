@@ -211,12 +211,12 @@ scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.tsv "$OUT/l
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.json "$OUT/lab/summary.json" || true
 
 run_peer_scenario() {
-  local id="$1" agent_cmd="$2" peer_cmd="$3" log_file="$OUT/logs/lab-$id.log"
+  local id="$1" agent_cmd="$2" peer_cmd="$3" delay="${4:-1}" log_file="$OUT/logs/lab-$id.log"
   [[ "$LAB_SCENARIOS" == "all" || ",$LAB_SCENARIOS," == *",$id,"* ]] || return 0
   log "running peer-coordinated NETA-LAB-$id"
   set +e
   ssh_host "$AGENT_PUBLIC_IP" "$agent_cmd" >"$log_file" 2>&1 & local agent_job=$!
-  sleep 1
+  sleep "$delay"
   local peer_rc=1
   for _ in {1..10}; do
     ssh_host "$COORDINATOR_PUBLIC_IP" "$peer_cmd" >>"$log_file" 2>&1
@@ -237,6 +237,10 @@ run_peer_scenario 016 \
 run_peer_scenario 017 \
   "sudo bash /opt/neta-acceptance/src/lab/scenarios/017-concurrent-inbound-outbound/linux/run.sh '$COORDINATOR_PRIVATE_IP' 18457 18458" \
   "cd '$PEER_LAB' && python3 common/client/tcp_lab_client.py '$AGENT_PRIVATE_IP' 18458 --connections 1 --upload-bytes 1048576 --scenario NETA-LAB-017-inbound" || PEER_RC=1
+run_peer_scenario 018 \
+  "sudo bash /opt/neta-acceptance/src/lab/scenarios/018-listener-negative-control/linux/run.sh 0.0.0.0 18458 15" \
+  "cd '$PEER_LAB' && python3 common/client/tcp_lab_client.py '$AGENT_PRIVATE_IP' 18458 --connections 1 --scenario NETA-LAB-018-client" \
+  16 || PEER_RC=1
 
 log "verifying fleet, restart recovery and mTLS rejection"
 ssh_host "$AGENT_PUBLIC_IP" "sudo /usr/local/bin/neta-agent fleet heartbeat --state-dir /var/lib/neta/identity; sudo systemctl restart neta-agent.service; sleep 3; sudo /usr/local/bin/neta-agent fleet heartbeat --state-dir /var/lib/neta/identity" >"$OUT/logs/agent-restart.log" 2>&1
