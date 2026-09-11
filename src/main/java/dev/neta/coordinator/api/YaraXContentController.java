@@ -118,6 +118,12 @@ public class YaraXContentController {
             return ResponseEntity.noContent().build();
         }
 
+        Integer alreadyActive = jdbc.queryForObject("""
+            SELECT count(*) FROM yarax_content_agent_state
+             WHERE agent_id=? AND active_bundle_id=? AND state='ACTIVE'
+            """, Integer.class, agentId, target);
+        if (alreadyActive != null && alreadyActive > 0) return ResponseEntity.noContent().build();
+
         var bundle = jdbc.queryForMap("SELECT bundle_id,revision,sha256,content FROM yarax_content_bundles WHERE bundle_id=?", target);
         jdbc.update("""
             INSERT INTO yarax_content_agent_state(agent_id,desired_bundle_id,state,updated_at)
