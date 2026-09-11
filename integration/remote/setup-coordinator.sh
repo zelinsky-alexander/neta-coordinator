@@ -16,7 +16,7 @@ chmod 0700 "$ROOT" "$PKI"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y git curl openssl ca-certificates docker.io docker-compose-v2
+apt-get install -y git curl openssl ca-certificates docker.io docker-compose-v2 python3
 systemctl enable --now docker
 
 checkout_ref() {
