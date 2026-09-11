@@ -90,7 +90,11 @@ trust_store="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c
 [[ -n "$key_store" ]] || { dump_coordinator_diagnostics; fail "coordinator TLS key store is not configured"; }
 [[ -n "$trust_store" ]] || { dump_coordinator_diagnostics; fail "coordinator TLS trust store is not configured"; }
 
-if ! "${compose[@]}" logs --tail=120 coordinator 2>/dev/null | grep -Eq 'Tomcat started on port 8080 \(https\)|Tomcat initialized with port 8080 \(https\)'; then
+# Capture logs first instead of piping `docker compose logs` directly into
+# `grep -q` under `set -o pipefail`. On a successful early match, grep exits and
+# Docker can receive SIGPIPE, making the overall pipeline look like a failure.
+recent_logs="$("${compose[@]}" logs --tail=120 coordinator 2>/dev/null || true)"
+if ! grep -Eq 'Tomcat started on port 8080 \(https\)|Tomcat initialized with port 8080 \(https\)' <<<"$recent_logs"; then
   dump_coordinator_diagnostics
   fail "coordinator did not report HTTPS on container port 8080"
 fi
