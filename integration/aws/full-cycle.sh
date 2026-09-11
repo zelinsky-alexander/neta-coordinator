@@ -249,19 +249,53 @@ ssh_host "$AGENT_PUBLIC_IP" "sudo /usr/local/bin/neta-agent fleet heartbeat --st
 ssh_host "$COORDINATOR_PUBLIC_IP" "cd /opt/neta-acceptance/src/coordinator; sudo env NETA_COORDINATOR_URL=https://127.0.0.1:8443 NETA_OPERATOR_CA=/opt/neta-acceptance/pki/fleet-ca.crt bash ./neta status; sudo env NETA_COORDINATOR_URL=https://127.0.0.1:8443 NETA_OPERATOR_CA=/opt/neta-acceptance/pki/fleet-ca.crt bash ./neta endpoints; sudo env NETA_COORDINATOR_URL=https://127.0.0.1:8443 NETA_OPERATOR_CA=/opt/neta-acceptance/pki/fleet-ca.crt bash ./neta findings --limit 100" >"$OUT/logs/coordinator-state.log" 2>&1
 ssh_host "$COORDINATOR_PUBLIC_IP" "cd /opt/neta-acceptance/src/portal && sudo bash ./deploy/health-check.sh" >"$OUT/logs/portal-health.log" 2>&1
 
+# Prove the application-layer client-certificate gate specifically. Sending `{}`
+# would only prove that malformed protocol input gets a 4xx because envelope
+# validation happens before the client-certificate check. Use the real enrolled
+# agent id and a structurally valid Heartbeat envelope, but deliberately omit the
+# client certificate. The expected result is the coordinator's exact 401 reason.
+AGENT_ENROLLED_ID="$(ssh_host "$AGENT_PUBLIC_IP" "sudo /usr/local/bin/neta-agent fleet status --state-dir /var/lib/neta/identity | sed -n 's/^Agent ID:[[:space:]]*//p' | head -n1")"
+[[ -n "$AGENT_ENROLLED_ID" ]] || { echo "cannot determine enrolled agent id for mTLS negative control" >&2; exit 1; }
+python3 - "$WORK/unauthenticated-message.json" "$AGENT_ENROLLED_ID" <<'PY'
+import datetime as dt, json, pathlib, sys, uuid
+out, agent_id = sys.argv[1:]
+created = dt.datetime.now(dt.timezone.utc)
+expires = created + dt.timedelta(seconds=60)
+iso = lambda value: value.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+message = {
+    "protocol": "neta-agent/1",
+    "schema_version": 1,
+    "message_id": f"acceptance-negative-{uuid.uuid4()}",
+    "message_type": "Heartbeat",
+    "agent_id": agent_id,
+    "created_at": iso(created),
+    "expires_at": iso(expires),
+    "sequence": 0,
+    "correlation_id": None,
+    "payload_hash": "sha256:" + "0" * 64,
+    "payload": {},
+    "signature": {
+        "algorithm": "acceptance-negative-control",
+        "key_id": "none",
+        "value": "not-used-without-client-certificate",
+    },
+}
+pathlib.Path(out).write_text(json.dumps(message, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+scp_to "$WORK/unauthenticated-message.json" "$COORDINATOR_PUBLIC_IP" /tmp/neta-unauth-request.json
 set +e
-UNAUTH_CODE="$(ssh_host "$COORDINATOR_PUBLIC_IP" "sudo curl -sS --cacert /opt/neta-acceptance/pki/fleet-ca.crt -o /tmp/neta-unauth-body -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' https://127.0.0.1:8443/api/v1/messages" 2>"$OUT/logs/unauthenticated-mtls.log")"
+UNAUTH_CODE="$(ssh_host "$COORDINATOR_PUBLIC_IP" "sudo curl -sS --cacert /opt/neta-acceptance/pki/fleet-ca.crt -o /tmp/neta-unauth-body -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @/tmp/neta-unauth-request.json https://127.0.0.1:8443/api/v1/messages" 2>"$OUT/logs/unauthenticated-mtls.log")"
 UNAUTH_CURL_RC=$?
+UNAUTH_BODY="$(ssh_host "$COORDINATOR_PUBLIC_IP" "sudo cat /tmp/neta-unauth-body 2>/dev/null" 2>/dev/null)"
 set -e
-printf 'curl_rc=%s http_code=%s\n' "$UNAUTH_CURL_RC" "$UNAUTH_CODE" >>"$OUT/logs/unauthenticated-mtls.log"
-ssh_host "$COORDINATOR_PUBLIC_IP" "sudo cat /tmp/neta-unauth-body 2>/dev/null || true" >>"$OUT/logs/unauthenticated-mtls.log" 2>&1 || true
+printf 'curl_rc=%s http_code=%s agent_id=%s\n%s\n' "$UNAUTH_CURL_RC" "$UNAUTH_CODE" "$AGENT_ENROLLED_ID" "$UNAUTH_BODY" >>"$OUT/logs/unauthenticated-mtls.log"
 if ((UNAUTH_CURL_RC != 0)); then
-  echo "negative control transport failed; rejection was not proven at HTTP/application layer" >>"$OUT/logs/unauthenticated-mtls.log"
+  echo "negative control transport failed; client-certificate rejection was not proven" >>"$OUT/logs/unauthenticated-mtls.log"
   SECURITY_RC=1
-elif [[ "$UNAUTH_CODE" =~ ^4[0-9]{2}$ ]]; then
+elif [[ "$UNAUTH_CODE" == "401" ]] && grep -Fq 'client certificate is required' <<<"$UNAUTH_BODY"; then
   SECURITY_RC=0
 else
-  echo "unauthenticated message endpoint returned unexpected HTTP $UNAUTH_CODE" >>"$OUT/logs/unauthenticated-mtls.log"
+  echo "negative control did not reach the expected missing-client-certificate rejection" >>"$OUT/logs/unauthenticated-mtls.log"
   SECURITY_RC=1
 fi
 
