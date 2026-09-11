@@ -121,6 +121,9 @@ jobs:
             --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
             --output text)"
           read -r access secret session <<<"$creds"
+          echo "::add-mask::$access"
+          echo "::add-mask::$secret"
+          echo "::add-mask::$session"
           {
             echo "AWS_ACCESS_KEY_ID=$access"
             echo "AWS_SECRET_ACCESS_KEY=$secret"
