@@ -76,7 +76,19 @@ openssl x509 -req -in portal-client.csr -CA fleet-ca.crt -CAkey fleet-ca.key -CA
 
 openssl pkcs12 -export -name neta-coordinator -inkey coordinator.key -in coordinator.crt -certfile fleet-ca.crt -out coordinator.p12 -passout "pass:$STORE_PASSWORD" >/dev/null 2>&1
 openssl pkcs12 -export -name neta-agent-issuer -inkey agent-issuer.key -in agent-issuer.crt -certfile fleet-ca.crt -out agent-issuer.p12 -passout "pass:$STORE_PASSWORD" >/dev/null 2>&1
-openssl pkcs12 -export -nokeys -name fleet-ca -in fleet-ca.crt -out fleet-trust.p12 -passout "pass:$STORE_PASSWORD" >/dev/null 2>&1
+# OpenSSL's cert-only PKCS#12 export is not treated as a Java trusted-cert entry,
+# which leaves Tomcat with zero trust anchors. Build the trust store with keytool
+# from the same Temurin JRE image already used by the production coordinator.
+rm -f fleet-trust.p12
+docker run --rm \
+  -v "$PKI:/pki" \
+  eclipse-temurin:21-jre-jammy \
+  keytool -importcert -noprompt \
+    -alias fleet-ca \
+    -file /pki/fleet-ca.crt \
+    -keystore /pki/fleet-trust.p12 \
+    -storetype PKCS12 \
+    -storepass "$STORE_PASSWORD" >/dev/null
 chmod 0600 *.key *.p12
 chmod 0644 *.crt
 
