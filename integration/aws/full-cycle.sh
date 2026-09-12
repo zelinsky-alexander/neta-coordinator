@@ -167,6 +167,9 @@ ssh_host "$COORDINATOR_PUBLIC_IP" \
   "sudo env COORDINATOR_REPOSITORY='$COORDINATOR_REPOSITORY' COORDINATOR_REF='$COORDINATOR_RESOLVED_SHA' PORTAL_REPOSITORY='$PORTAL_REPOSITORY' PORTAL_REF='$PORTAL_RESOLVED_SHA' COORDINATOR_PRIVATE_IP='$COORDINATOR_PRIVATE_IP' bash /tmp/setup-coordinator.sh" \
   >"$OUT/logs/coordinator-setup.log" 2>&1
 
+log "verifying coordinator acceptance artifacts before transfer"
+ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; for path in /opt/neta-acceptance/pki/fleet-ca.crt /opt/neta-acceptance/runtime.env /opt/neta-acceptance/revisions.txt /opt/neta-acceptance/production-parity.txt; do if ! sudo test -s \"\$path\"; then echo \"missing or empty coordinator acceptance artifact: \$path\" >&2; exit 1; fi; done"
+
 # Keep the coordinator acceptance root private. Pull these small text artifacts
 # through sudo over the authenticated SSH channel instead of loosening permissions.
 scp_from_root_text "$COORDINATOR_PUBLIC_IP" /opt/neta-acceptance/pki/fleet-ca.crt "$WORK/fleet-ca.crt"
