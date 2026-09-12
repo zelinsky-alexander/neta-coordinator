@@ -12,7 +12,14 @@ SRC="$ROOT/src"
 PKI="$ROOT/pki"
 RUNTIME="$ROOT/runtime.env"
 mkdir -p "$SRC" "$PKI"
-chmod 0700 "$ROOT" "$PKI"
+# The acceptance runner connects as ubuntu and later invokes privileged
+# coordinator/portal commands from the checked-out sources. Allow only the
+# ubuntu group to traverse the acceptance root; keep it non-listable and keep
+# PKI material root-only.
+chgrp "$(id -gn ubuntu)" "$ROOT"
+chmod 0710 "$ROOT"
+chmod 0755 "$SRC"
+chmod 0700 "$PKI"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
