@@ -57,7 +57,8 @@ scp_from_root_text(){
 wait_ssh(){ local ip="$1"; for _ in {1..60}; do ssh_host "$ip" true >/dev/null 2>&1 && return 0; sleep 5; done; return 1; }
 
 resolve_ref() {
-  local repository="$1" ref="$2" name="$3" dir="$WORK/resolve-$name"
+  local repository="$1" ref="$2" name="$3"
+  local dir="$WORK/resolve-$name"
   git init -q "$dir"
   git -C "$dir" remote add origin "https://github.com/${repository}.git"
   git -C "$dir" fetch -q --depth=1 origin "$ref"
@@ -214,7 +215,8 @@ scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.tsv "$OUT/l
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.json "$OUT/lab/summary.json" || true
 
 run_peer_scenario() {
-  local id="$1" agent_cmd="$2" peer_cmd="$3" delay="${4:-1}" log_file="$OUT/logs/lab-$id.log"
+  local id="$1" agent_cmd="$2" peer_cmd="$3" delay="${4:-1}"
+  local log_file="$OUT/logs/lab-$id.log"
   [[ "$LAB_SCENARIOS" == "all" || ",$LAB_SCENARIOS," == *",$id,"* ]] || return 0
   log "running peer-coordinated NETA-LAB-$id"
   set +e
