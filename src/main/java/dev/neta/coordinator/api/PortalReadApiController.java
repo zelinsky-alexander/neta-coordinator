@@ -23,6 +23,24 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/v1")
 public class PortalReadApiController {
     private static final int MAX_LIMIT = 100;
+    private static final long MAX_FINDING_AGE_SECONDS = 10L * 365 * 24 * 60 * 60;
+    private static final String FINDING_ASSESSMENT_SQL = """
+            CASE
+              WHEN upper(COALESCE(f.subject_type,''))='PROCESS' THEN 'BEHAVIORAL_PATTERN'
+              WHEN upper(COALESCE(NULLIF(f.rule_id,''),
+                   (SELECT trim(substr(entry,length('Finding type:')+1))
+                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
+                     WHERE lower(entry) LIKE 'finding type:%' LIMIT 1),
+                   CASE WHEN f.finding_id LIKE 'FINDING-BEHAVIOR-%' THEN 'BEHAVIOR'
+                        WHEN f.finding_id LIKE 'FINDING-TRANSFER-%' THEN 'TRANSFER_BEHAVIOR'
+                        ELSE 'CONNECTION_ASSURANCE' END))='CONNECTION_ASSURANCE'
+                THEN 'PEER_' || COALESCE(NULLIF(upper(f.trust_verdict),''),'UNKNOWN')
+              ELSE 'INTENT_' || COALESCE(NULLIF(upper(
+                   (SELECT trim(substr(entry,length('Malicious intent:')+1))
+                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
+                     WHERE lower(entry) LIKE 'malicious intent:%' LIMIT 1)),''),'UNKNOWN')
+            END
+            """;
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
@@ -124,7 +142,10 @@ public class PortalReadApiController {
                                       @RequestParam(required=false) String target,
                                       @RequestParam(required=false) String severity,
                                       @RequestParam(required=false) String rule,
-                                      @RequestParam(required=false) Long olderThanSeconds) {
+                                      @RequestParam(required=false) String assessment,
+                                      @RequestParam(required=false) Long olderThanSeconds,
+                                      @RequestParam(required=false) Long newerThanSeconds) {
+        validateFindingAge(olderThanSeconds, newerThanSeconds);
         int bounded = bounded(limit);
         List<Object> args = new ArrayList<>();
         StringBuilder where = new StringBuilder(" WHERE 1=1");
@@ -135,10 +156,9 @@ public class PortalReadApiController {
         if (text(target)) { where.append(" AND lower(COALESCE(f.target_host,'') || ':' || COALESCE(f.target_port::text,''))=lower(?)"); args.add(target); }
         if (text(severity)) { where.append(" AND upper(COALESCE(f.severity,''))=upper(?)"); args.add(severity); }
         if (text(rule)) { where.append(" AND upper(COALESCE(f.rule_id,''))=upper(?)"); args.add(rule); }
-        if (olderThanSeconds != null) {
-            if (olderThanSeconds <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"olderThanSeconds must be positive");
-            where.append(" AND f.last_seen < now() - (? * interval '1 second')"); args.add(olderThanSeconds);
-        }
+        if (text(assessment)) { where.append(" AND upper((").append(FINDING_ASSESSMENT_SQL).append("))=upper(?)"); args.add(assessment.trim()); }
+        if (olderThanSeconds != null) { where.append(" AND f.last_seen < now() - (? * interval '1 second')"); args.add(olderThanSeconds); }
+        if (newerThanSeconds != null) { where.append(" AND f.last_seen >= now() - (? * interval '1 second')"); args.add(newerThanSeconds); }
         Cursor c = decode(cursor);
         if (c != null) { where.append(" AND (f.last_seen,f.finding_id) < (?,?)"); args.add(Timestamp.from(Instant.parse(c.value()))); args.add(c.id()); }
         args.add(bounded + 1);
@@ -277,6 +297,17 @@ public class PortalReadApiController {
     private static String networkSubject(String host,Integer port) {
         if(!text(host)) return "-";
         return port==null?host:host+":"+port;
+    }
+
+    private static void validateFindingAge(Long olderThanSeconds, Long newerThanSeconds) {
+        if (olderThanSeconds != null && newerThanSeconds != null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"olderThanSeconds and newerThanSeconds are mutually exclusive");
+        }
+        Long value = olderThanSeconds != null ? olderThanSeconds : newerThanSeconds;
+        if (value != null && (value <= 0 || value > MAX_FINDING_AGE_SECONDS)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "finding age must be between 1 and " + MAX_FINDING_AGE_SECONDS + " seconds");
+        }
     }
 
     private static String fallbackFindingType(String id){if(!text(id))return "-";if(id.startsWith("FINDING-BEHAVIOR-"))return "BEHAVIOR";if(id.startsWith("FINDING-TRANSFER-"))return "TRANSFER_BEHAVIOR";return "CONNECTION_ASSURANCE";}
