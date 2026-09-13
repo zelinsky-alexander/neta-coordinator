@@ -25,6 +25,23 @@ import org.springframework.web.server.ResponseStatusException;
 public class FindingBulkController {
     private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
     private static final long MAX_AGE_SECONDS = 10L * 365 * 24 * 60 * 60;
+    private static final String FINDING_ASSESSMENT_SQL = """
+            CASE
+              WHEN upper(COALESCE(f.subject_type,''))='PROCESS' THEN 'BEHAVIORAL_PATTERN'
+              WHEN upper(COALESCE(NULLIF(f.rule_id,''),
+                   (SELECT trim(substr(entry,length('Finding type:')+1))
+                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
+                     WHERE lower(entry) LIKE 'finding type:%' LIMIT 1),
+                   CASE WHEN f.finding_id LIKE 'FINDING-BEHAVIOR-%' THEN 'BEHAVIOR'
+                        WHEN f.finding_id LIKE 'FINDING-TRANSFER-%' THEN 'TRANSFER_BEHAVIOR'
+                        ELSE 'CONNECTION_ASSURANCE' END))='CONNECTION_ASSURANCE'
+                THEN 'PEER_' || COALESCE(NULLIF(upper(f.trust_verdict),''),'UNKNOWN')
+              ELSE 'INTENT_' || COALESCE(NULLIF(upper(
+                   (SELECT trim(substr(entry,length('Malicious intent:')+1))
+                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
+                     WHERE lower(entry) LIKE 'malicious intent:%' LIMIT 1)),''),'UNKNOWN')
+            END
+            """;
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -47,9 +64,11 @@ public class FindingBulkController {
                                @RequestParam(required = false) String severity,
                                @RequestParam(required = false) String rule,
                                @RequestParam(required = false) String status,
-                               @RequestParam(required = false) Long olderThanSeconds) {
+                               @RequestParam(required = false) String assessment,
+                               @RequestParam(required = false) Long olderThanSeconds,
+                               @RequestParam(required = false) Long newerThanSeconds) {
         requireAdmin(suppliedToken);
-        Filter filter = filter(agent, severity, rule, status, olderThanSeconds);
+        Filter filter = filter(agent, severity, rule, status, assessment, olderThanSeconds, newerThanSeconds);
         long count = count(filter);
         return new BulkPreview(count,
                 grouped(filter, "COALESCE(NULLIF(upper(f.severity),''),'-')"),
@@ -64,15 +83,16 @@ public class FindingBulkController {
                               @RequestParam(required = false) String severity,
                               @RequestParam(required = false) String rule,
                               @RequestParam(required = false) String status,
+                              @RequestParam(required = false) String assessment,
                               @RequestParam(required = false) Long olderThanSeconds,
+                              @RequestParam(required = false) Long newerThanSeconds,
                               @RequestParam String reason) {
         requireAdmin(suppliedToken);
         requireReason(reason);
-        Filter filter = filter(agent, severity, rule, status, olderThanSeconds);
+        Filter filter = filter(agent, severity, rule, status, assessment, olderThanSeconds, newerThanSeconds);
         requireSelectiveFilter(filter);
         long count = count(filter);
         if (count == 0) return new BulkResult("RESOLVE", 0, "No findings matched the filter.");
-
         clearFindingReferences(filter);
         int changed = jdbc.update("UPDATE findings f SET status='RESOLVED' " + filter.where(), filter.args().toArray());
         removeEmptyIncidents();
@@ -89,15 +109,16 @@ public class FindingBulkController {
                             @RequestParam(required = false) String severity,
                             @RequestParam(required = false) String rule,
                             @RequestParam(required = false) String status,
+                            @RequestParam(required = false) String assessment,
                             @RequestParam(required = false) Long olderThanSeconds,
+                            @RequestParam(required = false) Long newerThanSeconds,
                             @RequestParam String reason) {
         requireAdmin(suppliedToken);
         requireReason(reason);
-        Filter filter = filter(agent, severity, rule, status, olderThanSeconds);
+        Filter filter = filter(agent, severity, rule, status, assessment, olderThanSeconds, newerThanSeconds);
         requireSelectiveFilter(filter);
         long count = count(filter);
         if (count == 0) return new BulkResult("PURGE", 0, "No findings matched the filter.");
-
         clearFindingReferences(filter);
         int changed = jdbc.update("DELETE FROM findings f " + filter.where(), filter.args().toArray());
         removeEmptyIncidents();
@@ -121,19 +142,15 @@ public class FindingBulkController {
         for (Map<String, Object> row : rows) {
             Object bucket = row.get("bucket");
             Object total = row.get("total");
-            if (bucket != null && total instanceof Number number) {
-                result.put(bucket.toString(), number.longValue());
-            }
+            if (bucket != null && total instanceof Number number) result.put(bucket.toString(), number.longValue());
         }
         return result;
     }
 
     private void clearFindingReferences(Filter filter) {
         String selected = "SELECT f.finding_id FROM findings f JOIN agents a ON a.agent_id=f.agent_id " + filter.where();
-        jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id IN (" + selected + ")",
-                filter.args().toArray());
-        jdbc.update("DELETE FROM incident_findings WHERE finding_id IN (" + selected + ")",
-                filter.args().toArray());
+        jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id IN (" + selected + ")", filter.args().toArray());
+        jdbc.update("DELETE FROM incident_findings WHERE finding_id IN (" + selected + ")", filter.args().toArray());
     }
 
     private void removeEmptyIncidents() {
@@ -149,7 +166,9 @@ public class FindingBulkController {
             if (text(filter.severity())) details.put("severity", filter.severity());
             if (text(filter.rule())) details.put("rule", filter.rule());
             if (text(filter.status())) details.put("status", filter.status());
+            if (text(filter.assessment())) details.put("assessment", filter.assessment());
             if (filter.olderThanSeconds() != null) details.put("older_than_seconds", filter.olderThanSeconds());
+            if (filter.newerThanSeconds() != null) details.put("newer_than_seconds", filter.newerThanSeconds());
             jdbc.update("INSERT INTO audit_events(event_type,agent_id,details) VALUES (?,NULL,CAST(? AS jsonb))",
                     eventType, mapper.writeValueAsString(details));
         } catch (Exception e) {
@@ -157,85 +176,60 @@ public class FindingBulkController {
         }
     }
 
-    private Filter filter(String agent, String severity, String rule, String status, Long olderThanSeconds) {
-        if (olderThanSeconds != null && (olderThanSeconds <= 0 || olderThanSeconds > MAX_AGE_SECONDS)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "olderThanSeconds must be between 1 and " + MAX_AGE_SECONDS);
-        }
+    private Filter filter(String agent, String severity, String rule, String status, String assessment,
+                          Long olderThanSeconds, Long newerThanSeconds) {
+        validateAge(olderThanSeconds, newerThanSeconds);
         List<Object> args = new ArrayList<>();
         StringBuilder where = new StringBuilder(" WHERE 1=1");
         if (text(agent)) {
             where.append(" AND (f.agent_id=? OR lower(COALESCE((SELECT ax.display_name FROM agents ax WHERE ax.agent_id=f.agent_id),''))=lower(?))");
-            args.add(agent.trim());
-            args.add(agent.trim());
+            args.add(agent.trim()); args.add(agent.trim());
         }
-        if (text(severity)) {
-            where.append(" AND upper(COALESCE(f.severity,''))=upper(?)");
-            args.add(severity.trim());
+        if (text(severity)) { where.append(" AND upper(COALESCE(f.severity,''))=upper(?)"); args.add(severity.trim()); }
+        if (text(rule)) { where.append(" AND upper(COALESCE(f.rule_id,''))=upper(?)"); args.add(rule.trim()); }
+        if (text(status)) { where.append(" AND upper(COALESCE(f.status,''))=upper(?)"); args.add(status.trim()); }
+        if (text(assessment)) { where.append(" AND upper((").append(FINDING_ASSESSMENT_SQL).append("))=upper(?)"); args.add(assessment.trim()); }
+        if (olderThanSeconds != null) { where.append(" AND f.last_seen < now() - (? * interval '1 second')"); args.add(olderThanSeconds); }
+        if (newerThanSeconds != null) { where.append(" AND f.last_seen >= now() - (? * interval '1 second')"); args.add(newerThanSeconds); }
+        return new Filter(normalize(agent), normalize(severity), normalize(rule), normalize(status), normalize(assessment),
+                olderThanSeconds, newerThanSeconds, where.toString(), List.copyOf(args));
+    }
+
+    private static void validateAge(Long olderThanSeconds, Long newerThanSeconds) {
+        if (olderThanSeconds != null && newerThanSeconds != null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"olderThanSeconds and newerThanSeconds are mutually exclusive");
         }
-        if (text(rule)) {
-            where.append(" AND upper(COALESCE(f.rule_id,''))=upper(?)");
-            args.add(rule.trim());
+        Long value = olderThanSeconds != null ? olderThanSeconds : newerThanSeconds;
+        if (value != null && (value <= 0 || value > MAX_AGE_SECONDS)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"finding age must be between 1 and " + MAX_AGE_SECONDS);
         }
-        if (text(status)) {
-            where.append(" AND upper(COALESCE(f.status,''))=upper(?)");
-            args.add(status.trim());
-        }
-        if (olderThanSeconds != null) {
-            where.append(" AND f.last_seen < now() - (? * interval '1 second')");
-            args.add(olderThanSeconds);
-        }
-        return new Filter(normalize(agent), normalize(severity), normalize(rule), normalize(status), olderThanSeconds,
-                where.toString(), List.copyOf(args));
     }
 
     private static void requireSelectiveFilter(Filter filter) {
-        if (!text(filter.agent()) && !text(filter.severity()) && !text(filter.rule())
-                && !text(filter.status()) && filter.olderThanSeconds() == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "bulk finding changes require at least one filter");
+        if (!text(filter.agent()) && !text(filter.severity()) && !text(filter.rule()) && !text(filter.status())
+                && !text(filter.assessment()) && filter.olderThanSeconds() == null && filter.newerThanSeconds() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"bulk finding changes require at least one filter");
         }
     }
 
     private static void requireReason(String reason) {
         if (!text(reason)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "reason is required");
-        if (reason.trim().length() > 1000) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "reason must be at most 1000 characters");
-        }
+        if (reason.trim().length() > 1000) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "reason must be at most 1000 characters");
     }
 
     private void requireAdmin(String suppliedToken) {
-        if (adminToken.isBlank()) {
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
-                    "finding administration is disabled; configure NETA_OPERATOR_ADMIN_TOKEN");
-        }
+        if (adminToken.isBlank()) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                "finding administration is disabled; configure NETA_OPERATOR_ADMIN_TOKEN");
         byte[] expected = adminToken.getBytes(StandardCharsets.UTF_8);
         byte[] supplied = (suppliedToken == null ? "" : suppliedToken).getBytes(StandardCharsets.UTF_8);
-        if (!MessageDigest.isEqual(expected, supplied)) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid operator admin token");
-        }
+        if (!MessageDigest.isEqual(expected, supplied)) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "invalid operator admin token");
     }
 
-    private static String normalize(String value) {
-        return text(value) ? value.trim() : null;
-    }
+    private static String normalize(String value) { return text(value) ? value.trim() : null; }
+    private static boolean text(String value) { return value != null && !value.isBlank(); }
 
-    private static boolean text(String value) {
-        return value != null && !value.isBlank();
-    }
-
-    public record BulkPreview(long count,
-                              Map<String, Long> bySeverity,
-                              Map<String, Long> byRule,
-                              Map<String, Long> byAgent) {}
-
+    public record BulkPreview(long count, Map<String, Long> bySeverity, Map<String, Long> byRule, Map<String, Long> byAgent) {}
     public record BulkResult(String action, int affected, String message) {}
-
-    private record Filter(String agent,
-                          String severity,
-                          String rule,
-                          String status,
-                          Long olderThanSeconds,
-                          String where,
-                          List<Object> args) {}
+    private record Filter(String agent, String severity, String rule, String status, String assessment,
+                          Long olderThanSeconds, Long newerThanSeconds, String where, List<Object> args) {}
 }
