@@ -199,16 +199,18 @@ ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; cd '$PEER_LAB'; \
   nohup python3 common/server/beacon_server.py --bind 0.0.0.0 --port 18080 >/tmp/neta-lab-servers/001.log 2>&1 & \
   nohup python3 common/server/beacon_server.py --bind 0.0.0.0 --port 18443 --cert /tmp/neta-lab-servers/server.crt --key /tmp/neta-lab-servers/server.key >/tmp/neta-lab-servers/002.log 2>&1 & \
   nohup python3 scenarios/003-large-download/server/large_download_server.py --bind 0.0.0.0 --port 18081 --size-mib 50 >/tmp/neta-lab-servers/003.log 2>&1 & \
+  nohup python3 scenarios/004-terminalfix-style-chain/server/lab_https_server.py --bind 0.0.0.0 --port 18444 --cert /tmp/neta-lab-servers/server.crt --key /tmp/neta-lab-servers/server.key --payload scenarios/004-terminalfix-style-chain/payload/neta-lab-004-payload.sh --payload-route /payload/neta-lab-004-payload.sh >/tmp/neta-lab-servers/004.log 2>&1 & \
+  nohup python3 scenarios/005-lolbin-chain/server/lab_http_server.py --bind 0.0.0.0 --port 18580 >/tmp/neta-lab-servers/005.log 2>&1 & \
   nohup python3 common/server/tcp_lab_server.py --bind 0.0.0.0 --port 18447 --connections 1 --scenario NETA-LAB-007-peer >/tmp/neta-lab-servers/007.log 2>&1 & \
   nohup python3 common/server/tcp_lab_server.py --bind 0.0.0.0 --port 18448 --connections 5 --scenario NETA-LAB-008-peer >/tmp/neta-lab-servers/008.log 2>&1 & \
   nohup python3 common/server/tcp_lab_server.py --bind 0.0.0.0 --port 18454 --connections 100 --scenario NETA-LAB-014-peer >/tmp/neta-lab-servers/014.log 2>&1 & \
   nohup python3 common/server/tcp_lab_server.py --bind 0.0.0.0 --port 18455 --connections 250 --scenario NETA-LAB-015-peer >/tmp/neta-lab-servers/015.log 2>&1 & \
   nohup python3 common/server/tcp_lab_server.py --bind 0.0.0.0 --port 18457 --connections 1 --scenario NETA-LAB-017-peer >/tmp/neta-lab-servers/017.log 2>&1 & \
-  sleep 2; command -v ss >/dev/null; for p in 18080 18443 18081 18447 18448 18454 18455 18457; do ss -ltn | grep -Eq ":\$p[[:space:]]" || { echo "lab peer listener missing on port \$p" >&2; cat /tmp/neta-lab-servers/*.log >&2 || true; exit 1; }; done"
+  sleep 2; command -v ss >/dev/null; for p in 18080 18443 18081 18444 18580 18447 18448 18454 18455 18457; do ss -ltn | grep -Eq ":\$p[[:space:]]" || { echo "lab peer listener missing on port \$p" >&2; cat /tmp/neta-lab-servers/*.log >&2 || true; exit 1; }; done"
 
 log "running Linux NETA Lab command suite"
 set +e
-ssh_host "$AGENT_PUBLIC_IP" "sudo env NETA_LAB_TARGET_HOST='$COORDINATOR_PRIVATE_IP' NETA_LAB_SCENARIOS='$LAB_SCENARIOS' NETA_LAB_OUTPUT_DIR=/opt/neta-acceptance/lab-results bash /opt/neta-acceptance/src/lab/automation/run-linux-suite.sh --target-host '$COORDINATOR_PRIVATE_IP' --scenarios '$LAB_SCENARIOS' --output-dir /opt/neta-acceptance/lab-results" >"$OUT/logs/lab-suite.log" 2>&1
+ssh_host "$AGENT_PUBLIC_IP" "sudo env NETA_LAB_TARGET_HOST='$COORDINATOR_PRIVATE_IP' NETA_LAB_SCENARIOS='$LAB_SCENARIOS' NETA_LAB_OUTPUT_DIR=/opt/neta-acceptance/lab-results NETA_LAB_CA_CERT=/opt/neta-acceptance/fleet-ca.crt bash /opt/neta-acceptance/src/lab/automation/run-linux-suite.sh --target-host '$COORDINATOR_PRIVATE_IP' --scenarios '$LAB_SCENARIOS' --output-dir /opt/neta-acceptance/lab-results" >"$OUT/logs/lab-suite.log" 2>&1
 LAB_RC=$?
 set -e
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.tsv "$OUT/lab/summary.tsv" || true
