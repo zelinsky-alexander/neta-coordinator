@@ -21,7 +21,9 @@ All four selected refs are resolved once on the GitHub runner and frozen to exac
 
 If no package exists for the selected agent commit, acceptance fails during the preflight phase before creating the temporary security group or EC2 instances.
 
-Windows-only Lab scenarios are reported as `NOT_APPLICABLE` by this Linux acceptance job. NETA-LAB-016, NETA-LAB-017, and the connected phase of NETA-LAB-018 are driven by the full-cycle orchestrator because their ground truth requires a second owned host. For NETA-LAB-018 the orchestrator preserves the required idle-listener interval before making the one controlled peer connection.
+NETA-LAB-004, NETA-LAB-005 and NETA-LAB-006 now have native Linux implementations under the same immutable scenario IDs as their Windows variants. For Linux full-cycle runs, the coordinator peer host starts the controlled HTTPS service for NETA-LAB-004 on port `18444` and the controlled HTTP service for NETA-LAB-005 on port `18580`; NETA-LAB-006 is process-only and needs no peer server. The 004 HTTPS service uses the run's ephemeral coordinator certificate and the endpoint validates it with the run's Fleet CA. Any scenario that truly has no Linux implementation is still reported as `NOT_APPLICABLE`.
+
+NETA-LAB-016, NETA-LAB-017, and the connected phase of NETA-LAB-018 are driven by the full-cycle orchestrator because their ground truth requires a second owned host. For NETA-LAB-018 the orchestrator preserves the required idle-listener interval before making the one controlled peer connection.
 
 ## GitHub repository variables
 
@@ -118,7 +120,7 @@ The acceptance path covers:
 7. immutable package manifest/SHA-256 verification and runtime-only Linux agent installation;
 8. agent CSR enrollment, coordinator-issued identity certificate, `AgentHello` and heartbeat;
 9. central rule-set download/validation/activation;
-10. Linux NETA Lab command suite;
+10. Linux NETA Lab command suite, including native Linux NETA-LAB-004/005/006 endpoint-chain scenarios and their controlled peer services where needed;
 11. peer-driven NETA-LAB-016, NETA-LAB-017, and NETA-LAB-018 connected phase;
 12. agent restart and authenticated heartbeat;
 13. coordinator restart, bounded health convergence and agent recovery;
