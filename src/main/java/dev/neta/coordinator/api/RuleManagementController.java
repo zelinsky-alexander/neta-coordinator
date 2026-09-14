@@ -2,6 +2,8 @@ package dev.neta.coordinator.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.neta.coordinator.rules.ManagedRule;
+import dev.neta.coordinator.rules.RuleBundleInspectionService;
+import dev.neta.coordinator.rules.RuleBundleInspectionService.BundleView;
 import dev.neta.coordinator.rules.RuleConvergenceService;
 import dev.neta.coordinator.rules.RuleConvergenceService.AgentRuleState;
 import dev.neta.coordinator.rules.RuleManagementService;
@@ -37,17 +39,20 @@ public class RuleManagementController {
     private static final Set<String> AGENT_RULE_STATES = Set.of("INSTALLED", "ACTIVE", "APPLY_FAILED");
     private final RuleManagementService rules;
     private final RuleConvergenceService convergence;
+    private final RuleBundleInspectionService inspection;
     private final PeerCertificateService certificates;
     private final JdbcTemplate jdbc;
     private final String adminToken;
 
     public RuleManagementController(RuleManagementService rules,
                                     RuleConvergenceService convergence,
+                                    RuleBundleInspectionService inspection,
                                     PeerCertificateService certificates,
                                     JdbcTemplate jdbc,
                                     @Value("${NETA_OPERATOR_ADMIN_TOKEN:}") String adminToken) {
         this.rules = rules;
         this.convergence = convergence;
+        this.inspection = inspection;
         this.certificates = certificates;
         this.jdbc = jdbc;
         this.adminToken = adminToken == null ? "" : adminToken;
@@ -69,6 +74,36 @@ public class RuleManagementController {
     public List<AgentRuleState> fleetRuleState(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken) {
         requireAdmin(suppliedToken);
         return convergence.fleetStates();
+    }
+
+    @GetMapping("/operator/rule-sets/{revision}/bundle")
+    public BundleView baseBundle(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                                 @PathVariable long revision) {
+        requireAdmin(suppliedToken);
+        try { return inspection.base(revision); }
+        catch (IllegalArgumentException | IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e);
+        }
+    }
+
+    @GetMapping("/operator/rules/effective/{agentId}/desired")
+    public BundleView desiredBundle(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                                    @PathVariable String agentId) {
+        requireAdmin(suppliedToken);
+        try { return inspection.desired(agentId); }
+        catch (IllegalArgumentException | IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e);
+        }
+    }
+
+    @GetMapping("/operator/rules/effective/{agentId}/active")
+    public BundleView activeBundle(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                                   @PathVariable String agentId) {
+        requireAdmin(suppliedToken);
+        try { return inspection.active(agentId); }
+        catch (IllegalArgumentException | IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage(), e);
+        }
     }
 
     @PostMapping("/operator/rules/refresh/{agentId}")
@@ -173,6 +208,7 @@ public class RuleManagementController {
         if (request.revision() != effective.revision() || !request.sha256().equalsIgnoreCase(effective.sha256()))
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "agent rule state does not match this endpoint's current effective revision/hash");
+        inspection.snapshotDesiredForAgent(agentId);
         rules.acknowledge(agentId, request.revision(), request.sha256(), state, request.error());
         return new AckResponse(true, agentId, request.revision(), request.sha256(), state);
     }
