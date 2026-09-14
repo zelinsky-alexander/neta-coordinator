@@ -15,15 +15,19 @@ CREATE OR REPLACE FUNCTION neta_track_rule_ack()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE ack_changed boolean := false;
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        ack_changed := true;
+    ELSE
+        ack_changed := NEW.active_revision IS DISTINCT FROM OLD.active_revision
+                    OR NEW.active_sha256 IS DISTINCT FROM OLD.active_sha256
+                    OR NEW.status IS DISTINCT FROM OLD.status;
+    END IF;
+
     IF NEW.status IN ('INSTALLED','ACTIVE','APPLY_FAILED')
        AND NEW.active_sha256 IS NOT NULL
-       AND (
-            TG_OP = 'INSERT'
-            OR NEW.active_revision IS DISTINCT FROM OLD.active_revision
-            OR NEW.active_sha256 IS DISTINCT FROM OLD.active_sha256
-            OR NEW.status IS DISTINCT FROM OLD.status
-       ) THEN
+       AND ack_changed THEN
         NEW.last_ack_at = now();
     END IF;
 
