@@ -2,6 +2,8 @@ package dev.neta.coordinator.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.neta.coordinator.rules.ManagedRule;
+import dev.neta.coordinator.rules.RuleConvergenceService;
+import dev.neta.coordinator.rules.RuleConvergenceService.AgentRuleState;
 import dev.neta.coordinator.rules.RuleManagementService;
 import dev.neta.coordinator.rules.RuleManagementService.EffectiveRuleSet;
 import dev.neta.coordinator.rules.RuleManagementService.PublishedRuleSet;
@@ -34,15 +36,18 @@ public class RuleManagementController {
     private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
     private static final Set<String> AGENT_RULE_STATES = Set.of("INSTALLED", "ACTIVE", "APPLY_FAILED");
     private final RuleManagementService rules;
+    private final RuleConvergenceService convergence;
     private final PeerCertificateService certificates;
     private final JdbcTemplate jdbc;
     private final String adminToken;
 
     public RuleManagementController(RuleManagementService rules,
+                                    RuleConvergenceService convergence,
                                     PeerCertificateService certificates,
                                     JdbcTemplate jdbc,
                                     @Value("${NETA_OPERATOR_ADMIN_TOKEN:}") String adminToken) {
         this.rules = rules;
+        this.convergence = convergence;
         this.certificates = certificates;
         this.jdbc = jdbc;
         this.adminToken = adminToken == null ? "" : adminToken;
@@ -58,6 +63,23 @@ public class RuleManagementController {
     public List<RuleOverride> listOverrides(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken) {
         requireAdmin(suppliedToken);
         return rules.ruleOverrides();
+    }
+
+    @GetMapping("/operator/rules/fleet-state")
+    public List<AgentRuleState> fleetRuleState(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken) {
+        requireAdmin(suppliedToken);
+        return convergence.fleetStates();
+    }
+
+    @PostMapping("/operator/rules/refresh/{agentId}")
+    public AgentRuleState requestRuleRefresh(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                                             @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
+                                             @PathVariable String agentId) {
+        requireAdmin(suppliedToken);
+        try { return convergence.requestRefresh(agentId, actor); }
+        catch (IllegalArgumentException | IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
     }
 
     @PostMapping("/operator/rule-overrides/{id}/approve")
