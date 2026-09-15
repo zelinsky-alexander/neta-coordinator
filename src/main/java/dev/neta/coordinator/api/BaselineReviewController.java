@@ -8,8 +8,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.neta.coordinator.rules.RuleManagementService;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -119,10 +120,67 @@ public class BaselineReviewController {
             @RequestBody ReviewRequest request) {
         requireAdmin(suppliedToken);
         String reason = requireReason(request == null ? null : request.reason());
+        return rejectOne(candidateId, actorValue(actor), reason);
+    }
+
+    @PostMapping("/bulk-reject")
+    @Transactional
+    public BulkReviewResult bulkReject(
+            @RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+            @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
+            @RequestBody BulkReviewRequest request) {
+        requireAdmin(suppliedToken);
+        List<Long> ids = requireIds(request == null ? null : request.candidateIds());
+        String reason = requireReason(request == null ? null : request.reason());
+        String reviewer = actorValue(actor);
+        List<Candidate> candidates = lockCandidates(ids);
+        for (Candidate candidate : candidates) {
+            if (!"CANDIDATE".equals(candidate.status()))
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "candidate #" + candidate.candidateId() + " is already reviewed");
+        }
+        Set<String> agents = new LinkedHashSet<>();
+        for (Candidate candidate : candidates) {
+            jdbc.update("""
+                    UPDATE baseline_candidates SET status='REJECTED',reviewed_at=now(),reviewed_by=?,review_reason=?
+                     WHERE candidate_id=? AND status='CANDIDATE'
+                    """, reviewer, reason, candidate.candidateId());
+            audit("BASELINE_REJECTED", candidate, reviewer, reason, json.createObjectNode(), null);
+            agents.add(candidate.agentId());
+        }
+        agents.forEach(this::finishReviewIfComplete);
+        return new BulkReviewResult("REJECTED", candidates.size(), ids, reviewer, Instant.now());
+    }
+
+    @PostMapping("/{candidateId}/purge")
+    @Transactional
+    public PurgeResult purge(
+            @RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+            @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
+            @PathVariable long candidateId,
+            @RequestBody ReviewRequest request) {
+        requireAdmin(suppliedToken);
+        String reason = requireReason(request == null ? null : request.reason());
+        BulkReviewResult result = purgeLocked(List.of(candidateForUpdate(candidateId)), actorValue(actor), reason);
+        return new PurgeResult(candidateId, result.affected(), result.reviewedBy(), result.reviewedAt());
+    }
+
+    @PostMapping("/bulk-purge")
+    @Transactional
+    public BulkReviewResult bulkPurge(
+            @RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+            @RequestHeader(value = "X-NETA-Actor", required = false) String actor,
+            @RequestBody BulkReviewRequest request) {
+        requireAdmin(suppliedToken);
+        List<Long> ids = requireIds(request == null ? null : request.candidateIds());
+        String reason = requireReason(request == null ? null : request.reason());
+        return purgeLocked(lockCandidates(ids), actorValue(actor), reason);
+    }
+
+    private BaselineReviewResult rejectOne(long candidateId, String reviewer, String reason) {
         Candidate candidate = candidateForUpdate(candidateId);
         if (!"CANDIDATE".equals(candidate.status()))
             throw new ResponseStatusException(HttpStatus.CONFLICT, "baseline candidate is already reviewed");
-        String reviewer = actorValue(actor);
         jdbc.update("""
                 UPDATE baseline_candidates
                    SET status='REJECTED',reviewed_at=now(),reviewed_by=?,review_reason=?
@@ -132,6 +190,43 @@ public class BaselineReviewController {
         finishReviewIfComplete(candidate.agentId());
         return new BaselineReviewResult(candidateId, candidate.agentId(), candidate.ruleId(), "REJECTED",
                 null, null, json.createObjectNode(), reviewer, Instant.now());
+    }
+
+    private BulkReviewResult purgeLocked(List<Candidate> candidates, String reviewer, String reason) {
+        for (Candidate candidate : candidates) {
+            if ("APPROVED".equals(candidate.status()))
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "approved candidate #" + candidate.candidateId()
+                                + " cannot be purged while it is provenance for an active/retired policy override");
+        }
+        Set<String> agents = new LinkedHashSet<>();
+        List<Long> ids = new ArrayList<>();
+        for (Candidate candidate : candidates) {
+            audit("BASELINE_PURGED", candidate, reviewer, reason, json.createObjectNode(), null);
+            jdbc.update("DELETE FROM baseline_candidates WHERE candidate_id=?", candidate.candidateId());
+            agents.add(candidate.agentId());
+            ids.add(candidate.candidateId());
+        }
+        agents.forEach(this::finishReviewIfComplete);
+        return new BulkReviewResult("PURGED", candidates.size(), ids, reviewer, Instant.now());
+    }
+
+    private List<Candidate> lockCandidates(List<Long> ids) {
+        List<Candidate> candidates = new ArrayList<>(ids.size());
+        for (Long id : ids) candidates.add(candidateForUpdate(id));
+        return candidates;
+    }
+
+    private static List<Long> requireIds(List<Long> candidateIds) {
+        if (candidateIds == null || candidateIds.isEmpty())
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "candidateIds must not be empty");
+        LinkedHashSet<Long> ids = new LinkedHashSet<>();
+        for (Long id : candidateIds) {
+            if (id == null || id <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "candidateIds must be positive");
+            ids.add(id);
+        }
+        if (ids.size() > 500) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "at most 500 candidates may be changed at once");
+        return List.copyOf(ids);
     }
 
     private Candidate candidateForUpdate(long candidateId) {
@@ -147,7 +242,7 @@ public class BaselineReviewController {
                 rs.getLong("candidate_id"), rs.getString("agent_id"), rs.getString("rule_id"),
                 rs.getString("candidate_type"), rs.getString("candidate_key"), parse(rs.getString("evidence_json")),
                 rs.getLong("observation_count"), rs.getString("status"), rs.getInt("minimum_observations")), candidateId);
-        if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "baseline candidate not found");
+        if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "baseline candidate not found: " + candidateId);
         return rows.getFirst();
     }
 
@@ -208,6 +303,7 @@ public class BaselineReviewController {
         details.put("candidate_id", candidate.candidateId());
         details.put("candidate_type", candidate.candidateType());
         details.put("candidate_key", candidate.candidateKey());
+        details.put("candidate_status", candidate.status());
         if (candidate.ruleId() != null) details.put("rule_id", candidate.ruleId());
         details.put("actor", actor);
         details.put("reason", reason);
@@ -259,9 +355,13 @@ public class BaselineReviewController {
     }
 
     public record ReviewRequest(String reason) {}
+    public record BulkReviewRequest(List<Long> candidateIds, String reason) {}
     public record BaselineReviewResult(long candidateId, String agentId, String ruleId, String status,
                                        Long desiredRevision, String desiredSha256, JsonNode exclusionsPatch,
                                        String reviewedBy, Instant reviewedAt) {}
+    public record BulkReviewResult(String status, int affected, List<Long> candidateIds,
+                                   String reviewedBy, Instant reviewedAt) {}
+    public record PurgeResult(long candidateId, int affected, String purgedBy, Instant purgedAt) {}
     private record Candidate(long candidateId, String agentId, String ruleId, String candidateType,
                              String candidateKey, JsonNode evidence, long observationCount,
                              String status, int minimumObservations) {}
