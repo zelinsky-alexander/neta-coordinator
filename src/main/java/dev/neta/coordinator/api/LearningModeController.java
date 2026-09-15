@@ -54,19 +54,21 @@ public class LearningModeController {
         List<BaselineCandidate> candidates = jdbc.query("""
                 SELECT c.candidate_id,c.agent_id,a.display_name,c.rule_id,c.candidate_type,c.candidate_key,
                        c.evidence_json::text,c.observation_count,c.first_seen,c.last_seen,c.status,
+                       c.reviewed_at,c.reviewed_by,c.review_reason,
                        coalesce(s.minimum_observations,5) AS minimum_observations
                 FROM baseline_candidates c
                 JOIN agents a ON a.agent_id=c.agent_id
                 LEFT JOIN endpoint_learning_state s ON s.agent_id=c.agent_id
-                WHERE c.status='CANDIDATE'
-                ORDER BY c.observation_count DESC,c.last_seen DESC,c.candidate_id DESC
-                LIMIT 500
+                ORDER BY CASE c.status WHEN 'CANDIDATE' THEN 0 WHEN 'APPROVED' THEN 1 ELSE 2 END,
+                         coalesce(c.reviewed_at,c.last_seen) DESC,c.observation_count DESC,c.candidate_id DESC
+                LIMIT 1000
                 """, (rs, n) -> new BaselineCandidate(
                 rs.getLong("candidate_id"), rs.getString("agent_id"), rs.getString("display_name"),
                 rs.getString("rule_id"), rs.getString("candidate_type"), rs.getString("candidate_key"),
                 rs.getString("evidence_json"), rs.getLong("observation_count"),
                 instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")),
-                rs.getString("status"), rs.getLong("observation_count") >= rs.getInt("minimum_observations")));
+                rs.getString("status"), rs.getLong("observation_count") >= rs.getInt("minimum_observations"),
+                instant(rs.getTimestamp("reviewed_at")), rs.getString("reviewed_by"), rs.getString("review_reason")));
         return new LearningOverview(states, candidates);
     }
 
@@ -185,5 +187,6 @@ public class LearningModeController {
     public record BaselineCandidate(long candidateId, String agentId, String endpointName, String ruleId,
                                     String candidateType, String candidateKey, String evidenceJson,
                                     long observationCount, Instant firstSeen, Instant lastSeen,
-                                    String status, boolean readyForReview) {}
+                                    String status, boolean readyForReview,
+                                    Instant reviewedAt, String reviewedBy, String reviewReason) {}
 }
