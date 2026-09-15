@@ -1,5 +1,6 @@
 package dev.neta.coordinator.rules;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -10,10 +11,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** RM3.6 deterministic platform profiles layered before analyst endpoint overrides/baselines. */
+/** Deterministic platform profiles layered before analyst endpoint overrides/baselines. */
 @Service
 public class PlatformProfileService {
-    private static final int PROFILE_VERSION = 1;
     private static final String REASON_PREFIX = "RM3.6 profile:";
 
     private final JdbcTemplate jdbc;
@@ -27,12 +27,19 @@ public class PlatformProfileService {
     }
 
     public List<ProfileDefinition> definitions() {
-        return List.of(
-                new ProfileDefinition("base", PROFILE_VERSION, "Base / strict", "No platform-specific deltas; use the published fleet policy unchanged."),
-                new ProfileDefinition("linux-server", PROFILE_VERSION, "Linux server", "Conservative server defaults with higher process burst thresholds."),
-                new ProfileDefinition("linux-desktop", PROFILE_VERSION, "Linux desktop", "Desktop-oriented process burst thresholds to reduce routine application fanout noise."),
-                new ProfileDefinition("wsl", PROFILE_VERSION, "WSL", "Linux-under-Windows defaults including known WSL parent plumbing and desktop-like burst thresholds."),
-                new ProfileDefinition("windows", PROFILE_VERSION, "Windows", "Windows-oriented process burst thresholds while preserving trusted evaluator semantics."));
+        return jdbc.query("""
+                SELECT profile_id,version,name,description,updated_by,updated_at
+                  FROM platform_profile_catalog ORDER BY profile_id
+                """, (rs, n) -> new ProfileDefinition(rs.getString(1), rs.getInt(2), rs.getString(3), rs.getString(4),
+                rs.getString(5), instant(rs.getTimestamp(6))));
+    }
+
+    public List<ProfileRulePatch> rulePatches() {
+        return jdbc.query("""
+                SELECT profile_id,rule_id,parameters_patch::text,exclusions_patch::text,updated_by,updated_at
+                  FROM platform_profile_rule_patches ORDER BY profile_id,rule_id
+                """, (rs, n) -> new ProfileRulePatch(rs.getString(1), rs.getString(2), parse(rs.getString(3)),
+                parse(rs.getString(4)), rs.getString(5), instant(rs.getTimestamp(6))));
     }
 
     public List<EndpointProfile> assignments() {
@@ -57,8 +64,85 @@ public class PlatformProfileService {
     public EndpointProfile assign(String agentId, String requestedProfile, String actor) {
         String profile = normalizeProfile(requestedProfile);
         ensureActiveAgent(agentId);
-        String actorValue = actor == null || actor.isBlank() ? "operator" : actor.trim();
+        String actorValue = actorValue(actor);
+        int version = profileVersion(profile);
+        materialize(agentId, profile, version, actorValue);
 
+        jdbc.update("""
+                INSERT INTO endpoint_platform_profiles(agent_id,profile_id,profile_version,assigned_by,assigned_at,updated_at)
+                VALUES (?,?,?,?,now(),now())
+                ON CONFLICT(agent_id) DO UPDATE SET profile_id=EXCLUDED.profile_id,
+                    profile_version=EXCLUDED.profile_version,assigned_by=EXCLUDED.assigned_by,
+                    assigned_at=now(),updated_at=now()
+                """, agentId, profile, version, actorValue);
+        auditAssignment(agentId, profile, version, actorValue);
+        return assignments().stream().filter(a -> a.agentId().equals(agentId)).findFirst().orElseThrow();
+    }
+
+    @Transactional
+    public ProfileRulePatch updateRulePatch(String requestedProfile, String ruleId,
+                                            Map<String, ?> parameters, Map<String, ?> exclusions,
+                                            String actor) {
+        String profile = normalizeProfile(requestedProfile);
+        if ("base".equals(profile)) throw new IllegalArgumentException("base profile cannot contain platform deltas");
+        String rule = ruleId == null ? "" : ruleId.trim().toUpperCase(Locale.ROOT);
+        if (rule.isBlank()) throw new IllegalArgumentException("ruleId is required");
+        Integer ruleCount = jdbc.queryForObject("SELECT count(*) FROM rule_definitions WHERE rule_id=?", Integer.class, rule);
+        if (ruleCount == null || ruleCount == 0) throw new IllegalArgumentException("rule is not in the central catalog: " + rule);
+        String actorValue = actorValue(actor);
+        String parametersJson = write(parameters == null ? Map.of() : parameters);
+        String exclusionsJson = write(exclusions == null ? Map.of() : exclusions);
+        boolean empty = isEmptyObject(parametersJson) && isEmptyObject(exclusionsJson);
+
+        if (empty) {
+            jdbc.update("DELETE FROM platform_profile_rule_patches WHERE profile_id=? AND rule_id=?", profile, rule);
+        } else {
+            jdbc.update("""
+                    INSERT INTO platform_profile_rule_patches(profile_id,rule_id,parameters_patch,exclusions_patch,updated_by,updated_at)
+                    VALUES (?,?,?::jsonb,?::jsonb,?,now())
+                    ON CONFLICT(profile_id,rule_id) DO UPDATE SET
+                        parameters_patch=EXCLUDED.parameters_patch,
+                        exclusions_patch=EXCLUDED.exclusions_patch,
+                        updated_by=EXCLUDED.updated_by,updated_at=now()
+                    """, profile, rule, parametersJson, exclusionsJson, actorValue);
+        }
+        jdbc.update("UPDATE platform_profile_catalog SET version=version+1,updated_by=?,updated_at=now() WHERE profile_id=?",
+                actorValue, profile);
+        int version = profileVersion(profile);
+
+        List<String> assignedAgents = jdbc.query("""
+                SELECT p.agent_id FROM endpoint_platform_profiles p
+                JOIN agents a ON a.agent_id=p.agent_id
+                WHERE p.profile_id=? AND a.status='ACTIVE'
+                ORDER BY p.agent_id
+                """, (rs, n) -> rs.getString(1), profile);
+        for (String agentId : assignedAgents) {
+            materialize(agentId, profile, version, actorValue);
+            jdbc.update("UPDATE endpoint_platform_profiles SET profile_version=?,updated_at=now() WHERE agent_id=?",
+                    version, agentId);
+        }
+
+        String details = write(Map.of("profile_id", profile, "profile_version", version, "rule_id", rule,
+                "parameters_patch", parameters == null ? Map.of() : parameters,
+                "exclusions_patch", exclusions == null ? Map.of() : exclusions,
+                "assigned_endpoints_recalculated", assignedAgents.size(), "actor", actorValue));
+        jdbc.update("INSERT INTO audit_events(event_type,details) VALUES ('PLATFORM_PROFILE_RULE_UPDATED',?::jsonb)", details);
+
+        if (empty) return new ProfileRulePatch(profile, rule, json.createObjectNode(), json.createObjectNode(), actorValue, Instant.now());
+        return rulePatches().stream().filter(p -> p.profileId().equals(profile) && p.ruleId().equals(rule)).findFirst().orElseThrow();
+    }
+
+    public EffectiveProfile effective(String agentId) {
+        EndpointProfile assignment = assignments().stream().filter(a -> a.agentId().equals(agentId)).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("active endpoint not found: " + agentId));
+        RuleManagementService.EffectiveRuleSet effective = rules.effectiveForAgent(agentId);
+        String profile = assignment.profileId() == null ? "base" : assignment.profileId();
+        int version = assignment.profileVersion() == null ? profileVersion(profile) : assignment.profileVersion();
+        return new EffectiveProfile(agentId, assignment.endpointName(), profile, version,
+                effective.revision(), effective.version(), effective.sha256(), effective.appliedOverrideIds());
+    }
+
+    private void materialize(String agentId, String profile, int version, String actorValue) {
         List<Long> oldOverrides = jdbc.query("""
                 SELECT override_id FROM rule_overrides
                  WHERE scope_type='ENDPOINT' AND scope_id=? AND status='APPROVED'
@@ -73,20 +157,12 @@ public class PlatformProfileService {
                     INSERT INTO rule_overrides(scope_type,scope_id,rule_id,parameters_patch,exclusions_patch,status,reason,created_by)
                     VALUES ('ENDPOINT',?,?,?::jsonb,?::jsonb,'STAGED',?,?) RETURNING override_id
                     """, Long.class, agentId, patch.ruleId(), patch.parametersJson(), patch.exclusionsJson(),
-                    REASON_PREFIX + profile + "/v" + PROFILE_VERSION, actorValue);
+                    REASON_PREFIX + profile + "/v" + version, actorValue);
             if (id != null) {
                 rules.approveEndpointOverride(id, actorValue);
                 newOverrides.add(id);
             }
         }
-
-        jdbc.update("""
-                INSERT INTO endpoint_platform_profiles(agent_id,profile_id,profile_version,assigned_by,assigned_at,updated_at)
-                VALUES (?,?,?,?,now(),now())
-                ON CONFLICT(agent_id) DO UPDATE SET profile_id=EXCLUDED.profile_id,
-                    profile_version=EXCLUDED.profile_version,assigned_by=EXCLUDED.assigned_by,
-                    assigned_at=now(),updated_at=now()
-                """, agentId, profile, PROFILE_VERSION, actorValue);
 
         RuleManagementService.EffectiveRuleSet effective = rules.effectiveForAgent(agentId);
         jdbc.update("""
@@ -97,52 +173,32 @@ public class PlatformProfileService {
                     status=CASE WHEN agent_rule_state.active_sha256=EXCLUDED.desired_sha256 THEN 'ACTIVE' ELSE 'STALE' END,
                     last_error=NULL,updated_at=now()
                 """, agentId, effective.revision(), effective.sha256());
-
-        String details = write(Map.of("profile_id", profile, "profile_version", PROFILE_VERSION,
-                "override_ids", newOverrides, "desired_revision", effective.revision(), "desired_sha256", effective.sha256(),
-                "actor", actorValue));
-        jdbc.update("INSERT INTO audit_events(event_type,agent_id,details) VALUES ('PLATFORM_PROFILE_ASSIGNED',?,?::jsonb)", agentId, details);
-        return assignments().stream().filter(a -> a.agentId().equals(agentId)).findFirst().orElseThrow();
     }
 
-    public EffectiveProfile effective(String agentId) {
-        EndpointProfile assignment = assignments().stream().filter(a -> a.agentId().equals(agentId)).findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("active endpoint not found: " + agentId));
+    private void auditAssignment(String agentId, String profile, int version, String actorValue) {
         RuleManagementService.EffectiveRuleSet effective = rules.effectiveForAgent(agentId);
-        String profile = assignment.profileId() == null ? "base" : assignment.profileId();
-        int version = assignment.profileVersion() == null ? PROFILE_VERSION : assignment.profileVersion();
-        return new EffectiveProfile(agentId, assignment.endpointName(), profile, version,
-                effective.revision(), effective.version(), effective.sha256(), effective.appliedOverrideIds());
+        String details = write(Map.of("profile_id", profile, "profile_version", version,
+                "desired_revision", effective.revision(), "desired_sha256", effective.sha256(), "actor", actorValue));
+        jdbc.update("INSERT INTO audit_events(event_type,agent_id,details) VALUES ('PLATFORM_PROFILE_ASSIGNED',?,?::jsonb)", agentId, details);
     }
 
     private List<Patch> patches(String profile) {
-        return switch (profile) {
-            case "base" -> List.of();
-            case "linux-server" -> List.of(
-                    patch("PROC-004", Map.of("child_count", 10), Map.of()),
-                    patch("PROC-005", Map.of("child_count", 10), Map.of()));
-            case "linux-desktop" -> List.of(
-                    patch("PROC-004", Map.of("child_count", 12), Map.of()),
-                    patch("PROC-005", Map.of("child_count", 12), Map.of()));
-            case "wsl" -> List.of(
-                    patch("PROC-002", Map.of(), Map.of("parent_process_names", List.of("wsl-pro-service"))),
-                    patch("PROC-004", Map.of("child_count", 12), Map.of()),
-                    patch("PROC-005", Map.of("child_count", 12), Map.of()));
-            case "windows" -> List.of(
-                    patch("PROC-004", Map.of("child_count", 12), Map.of()),
-                    patch("PROC-005", Map.of("child_count", 12), Map.of()));
-            default -> throw new IllegalArgumentException("unsupported platform profile: " + profile);
-        };
+        return jdbc.query("""
+                SELECT rule_id,parameters_patch::text,exclusions_patch::text
+                  FROM platform_profile_rule_patches WHERE profile_id=? ORDER BY rule_id
+                """, (rs, n) -> new Patch(rs.getString(1), rs.getString(2), rs.getString(3)), profile);
     }
 
-    private Patch patch(String ruleId, Map<String, ?> parameters, Map<String, ?> exclusions) {
-        return new Patch(ruleId, write(parameters), write(exclusions));
+    private int profileVersion(String profile) {
+        Integer version = jdbc.queryForObject("SELECT version FROM platform_profile_catalog WHERE profile_id=?", Integer.class, profile);
+        if (version == null) throw new IllegalArgumentException("unsupported platform profile: " + profile);
+        return version;
     }
 
     private String normalizeProfile(String value) {
         String profile = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
-        boolean valid = definitions().stream().anyMatch(d -> d.id().equals(profile));
-        if (!valid) throw new IllegalArgumentException("unsupported platform profile: " + value);
+        Integer count = jdbc.queryForObject("SELECT count(*) FROM platform_profile_catalog WHERE profile_id=?", Integer.class, profile);
+        if (count == null || count != 1) throw new IllegalArgumentException("unsupported platform profile: " + value);
         return profile;
     }
 
@@ -159,6 +215,18 @@ public class PlatformProfileService {
         return "base";
     }
 
+    private String actorValue(String actor) { return actor == null || actor.isBlank() ? "operator" : actor.trim(); }
+
+    private boolean isEmptyObject(String value) {
+        try { JsonNode node = json.readTree(value); return node != null && node.isObject() && node.isEmpty(); }
+        catch (Exception e) { return false; }
+    }
+
+    private JsonNode parse(String value) {
+        try { return json.readTree(value == null || value.isBlank() ? "{}" : value); }
+        catch (Exception e) { throw new IllegalStateException("stored platform profile JSON is invalid", e); }
+    }
+
     private String write(Object value) {
         try { return json.writeValueAsString(value); }
         catch (Exception e) { throw new IllegalStateException("platform profile payload cannot be serialized", e); }
@@ -167,7 +235,10 @@ public class PlatformProfileService {
     private static Instant instant(java.sql.Timestamp value) { return value == null ? null : value.toInstant(); }
 
     private record Patch(String ruleId, String parametersJson, String exclusionsJson) {}
-    public record ProfileDefinition(String id, int version, String name, String description) {}
+    public record ProfileDefinition(String id, int version, String name, String description,
+                                    String updatedBy, Instant updatedAt) {}
+    public record ProfileRulePatch(String profileId, String ruleId, JsonNode parametersPatch,
+                                   JsonNode exclusionsPatch, String updatedBy, Instant updatedAt) {}
     public record EndpointProfile(String agentId, String endpointName, String os, String arch,
                                   String profileId, Integer profileVersion, String assignedBy,
                                   Instant assignedAt, Instant updatedAt, String suggestedProfile) {}
