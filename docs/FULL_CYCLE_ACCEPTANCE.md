@@ -129,7 +129,7 @@ The acceptance path covers:
 16. logs, frozen revision SHAs, production-parity evidence, Lab summaries, JUnit XML, JSON summary and `ACCEPTANCE.md` generation;
 17. unconditional AWS resource cleanup.
 
-The Lab `expected.yaml` files remain the scenario ground-truth specification. The current integration harness treats scenario command completion plus the NETA system-level evidence/fleet checks as the automated gate; it does not invent semantic assertions when an `expected.yaml` field is not yet exposed by a stable machine-readable coordinator/agent query. Those expected files and runtime evidence should be used to extend scenario-specific assertions as the evidence query surface stabilizes.
+The Lab `expected.yaml` files remain the scenario ground-truth specification. Their constrained `acceptance_contract` sections are normalized before execution and compared with a read-only agent evidence snapshot, the coordinator structured findings API, and both Portal `ALL` and `ACTIVE` filters. Missing required evidence, a missing semantic detector, missing rule-set/evidence-root provenance, incorrect status or severity, incorrect Portal filtering, and forbidden rules fail closed. Unsupported evidence is reported explicitly and cannot produce a green full-cycle.
 
 ## Agent package prerequisite
 
@@ -158,6 +158,14 @@ agent-revisions.txt
 lab/summary.tsv
 lab/summary.json
 lab/peer-summary.tsv
+lab/contracts.json
+lab/agent-evidence.json
+lab/coordinator-findings.json
+lab/portal-findings.json
+lab/portal-active-findings.json
+lab/expected-vs-actual.json
+lab/expected-vs-actual.tsv
+lab/lab-acceptance.junit.xml
 logs/
 ```
 

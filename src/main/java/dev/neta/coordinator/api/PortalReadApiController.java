@@ -166,7 +166,8 @@ public class PortalReadApiController {
                 SELECT f.finding_id,f.agent_id,a.display_name,f.target_host,f.target_port,
                        f.subject_type,f.subject_id,f.severity,f.rule_id,f.trust_verdict,
                        f.performance_verdict,f.occurrence_count,f.status,f.first_seen,f.last_seen,m.incident_id,
-                       f.changes::text AS changes
+                       f.changes::text AS changes,f.observed_from,f.observed_to,
+                       f.evidence_root,f.rule_set::text AS rule_set
                 FROM findings f JOIN agents a ON a.agent_id=f.agent_id
                 LEFT JOIN incident_findings m ON m.finding_id=f.finding_id
                 """ + where + " ORDER BY f.last_seen DESC,f.finding_id DESC LIMIT ?",
@@ -175,7 +176,9 @@ public class PortalReadApiController {
                         rs.getString("subject_type"), rs.getString("subject_id"), rs.getString("severity"), rs.getString("rule_id"),
                         rs.getString("trust_verdict"), rs.getString("performance_verdict"), rs.getLong("occurrence_count"),
                         rs.getString("status"), instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")),
-                        rs.getString("incident_id"), rs.getString("changes")),
+                        rs.getString("incident_id"), rs.getString("changes"),
+                        instant(rs.getTimestamp("observed_from")), instant(rs.getTimestamp("observed_to")),
+                        rs.getString("evidence_root"), rs.getString("rule_set")),
                 args.toArray());
         return page(rows, bounded, r -> encode(r.lastSeen().toString(), r.id()));
     }
@@ -186,7 +189,8 @@ public class PortalReadApiController {
                 SELECT f.finding_id,f.agent_id,a.display_name,f.target_host,f.target_port,
                        f.subject_type,f.subject_id,f.severity,f.rule_id,f.trust_verdict,
                        f.performance_verdict,f.occurrence_count,f.status,f.first_seen,f.last_seen,m.incident_id,
-                       f.changes::text AS changes
+                       f.changes::text AS changes,f.observed_from,f.observed_to,
+                       f.evidence_root,f.rule_set::text AS rule_set
                 FROM findings f JOIN agents a ON a.agent_id=f.agent_id
                 LEFT JOIN incident_findings m ON m.finding_id=f.finding_id WHERE f.finding_id=?
                 """, (rs,n) -> findingItem(rs.getString("finding_id"),rs.getString("agent_id"),rs.getString("display_name"),
@@ -194,7 +198,9 @@ public class PortalReadApiController {
                         rs.getString("subject_type"),rs.getString("subject_id"),rs.getString("severity"),rs.getString("rule_id"),
                         rs.getString("trust_verdict"),rs.getString("performance_verdict"),rs.getLong("occurrence_count"),
                         rs.getString("status"),instant(rs.getTimestamp("first_seen")),instant(rs.getTimestamp("last_seen")),
-                        rs.getString("incident_id"),rs.getString("changes")), findingId);
+                        rs.getString("incident_id"),rs.getString("changes"),
+                        instant(rs.getTimestamp("observed_from")),instant(rs.getTimestamp("observed_to")),
+                        rs.getString("evidence_root"),rs.getString("rule_set")), findingId);
         if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"finding not found");
         return rows.getFirst();
     }
@@ -246,11 +252,14 @@ public class PortalReadApiController {
     private FindingItem findingItem(String id,String agentId,String displayName,String host,Integer port,
                                     String subjectType,String subjectId,String storedSeverity,String ruleId,
                                     String trust,String performance,long count,String status,Instant firstSeen,
-                                    Instant lastSeen,String incidentId,String changes) {
+                                    Instant lastSeen,String incidentId,String changes,
+                                    Instant observedFrom,Instant observedTo,String evidenceRoot,
+                                    String ruleSet) {
         boolean process = "PROCESS".equalsIgnoreCase(subjectType);
         String type = text(ruleId)
                 ? ruleId
                 : findingAttribute(changes,"Finding type:",fallbackFindingType(id));
+        String semanticType = findingAttribute(changes,"Finding type:",fallbackFindingType(id));
         String severity = text(storedSeverity)
                 ? storedSeverity
                 : findingAttribute(changes,"Severity:","-");
@@ -261,7 +270,14 @@ public class PortalReadApiController {
                 : networkSubject(host, port);
         String assessment = process ? "BEHAVIORAL_PATTERN" : assessment(type,trust,intent);
         return new FindingItem(id,agentId,display(displayName,agentId),subject,subjectType,subjectId,host,port,
-                type,severity,confidence,assessment,trust,performance,count,status,firstSeen,lastSeen,incidentId);
+                type,semanticType,severity,confidence,assessment,trust,performance,count,status,firstSeen,lastSeen,
+                incidentId,observedFrom,observedTo,evidenceRoot,parseNullable(ruleSet));
+    }
+
+    private JsonNode parseNullable(String value) {
+        if (!text(value)) return null;
+        try { return mapper.readTree(value); }
+        catch (Exception ignored) { return null; }
     }
 
     private String findingAttribute(String changes,String prefix,String fallback) {
@@ -331,7 +347,7 @@ public class PortalReadApiController {
     public record CertificateCounts(long valid,long expiring,long critical,long expired,long unknown){}
     public record FleetSummary(FleetAgents agents,FindingCounts findings,CertificateCounts certificates){}
     public record AgentItem(String id,String name,String state,Instant lastSeen,String version,String build,String gitCommit,String os,String arch,String artifactSha256,Integer protocolVersion,Integer schemaVersion,String features,String certificateSha256,Instant enrolledAt,long lastSequence){}
-    public record FindingItem(String id,String agentId,String agentName,String subject,String subjectType,String subjectId,String host,Integer port,String type,String severity,String confidence,String assessment,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId){}
+    public record FindingItem(String id,String agentId,String agentName,String subject,String subjectType,String subjectId,String host,Integer port,String type,String semanticType,String severity,String confidence,String assessment,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId,Instant observedFrom,Instant observedTo,String evidenceRoot,JsonNode ruleSet){}
     public record CertificateItem(String agentId,String agentName,String agentStatus,String state,String fingerprint,Instant notBefore,Instant notAfter,Instant rotatedAt){}
     public record UpgradeItem(UUID id,String agentId,String fromVersion,String fromBuild,String targetVersion,String targetBuild,String status,String os,String arch,String sourceType,String sourceRef,Instant requestedAt,String failureCode,String failureMessage){}
 }

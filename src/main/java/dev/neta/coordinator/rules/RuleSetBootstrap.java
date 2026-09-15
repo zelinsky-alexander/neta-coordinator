@@ -1,7 +1,9 @@
 package dev.neta.coordinator.rules;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
@@ -21,8 +23,9 @@ public class RuleSetBootstrap implements ApplicationRunner {
     public void run(ApplicationArguments args) {
         try {
             RuleManagementService.PublishedRuleSet active = rules.active();
-            if (needsPerformanceTuning(active.bundle(), rules.currentRules())) {
-                rules.publish("system:perf-false-positive-tuning");
+            List<ManagedRule> currentRules = rules.currentRules();
+            if (needsCatalogRefresh(active.bundle(), currentRules)) {
+                rules.publish("system:rule-catalog-refresh");
             }
         } catch (IllegalStateException noPublishedRuleSet) {
             rules.publish("system-bootstrap");
@@ -45,5 +48,14 @@ public class RuleSetBootstrap implements ApplicationRunner {
                     < TUNED_RETRANSMISSION_THRESHOLD;
         }
         return true;
+    }
+
+    private static boolean needsCatalogRefresh(JsonNode activeBundle, List<ManagedRule> currentRules) {
+        if (needsPerformanceTuning(activeBundle, currentRules)) return true;
+        JsonNode activeRules = activeBundle.path("rules");
+        if (!activeRules.isArray()) return true;
+        Set<String> publishedIds = new HashSet<>();
+        activeRules.forEach(rule -> publishedIds.add(rule.path("id").asText()));
+        return currentRules.stream().map(ManagedRule::id).anyMatch(id -> !publishedIds.contains(id));
     }
 }

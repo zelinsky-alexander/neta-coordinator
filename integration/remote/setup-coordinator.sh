@@ -44,12 +44,14 @@ ADMIN_TOKEN="$(openssl rand -hex 24)"
 PORTAL_SERVICE_TOKEN="$(openssl rand -hex 24)"
 STORE_PASSWORD="$(openssl rand -hex 24)"
 PORTAL_SESSION_SECRET="$(openssl rand -hex 32)"
+PORTAL_PASSWORD="$(openssl rand -hex 24)"
 
 cat >"$RUNTIME" <<EOF
 ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN
 ADMIN_TOKEN=$ADMIN_TOKEN
 PORTAL_SERVICE_TOKEN=$PORTAL_SERVICE_TOKEN
 STORE_PASSWORD=$STORE_PASSWORD
+PORTAL_PASSWORD=$PORTAL_PASSWORD
 EOF
 chmod 0600 "$RUNTIME"
 
@@ -155,7 +157,13 @@ install -m 0400 "$PKI/portal-client.key" "$PORTAL/secrets/portal-client-key.pem"
 # The production portal image also runs as UID 10001, so keep its private key
 # non-world-readable while making it readable by the container process.
 chown 10001:10001 "$PORTAL/secrets/portal-client-key.pem"
-PORTAL_HASH="scrypt\$$(openssl rand -hex 16)\$$(openssl rand -hex 32)"
+PORTAL_HASH="$(python3 - "$PORTAL_PASSWORD" <<'PY'
+import hashlib, os, sys
+salt = os.urandom(16)
+derived = hashlib.scrypt(sys.argv[1].encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
+print(f"scrypt${salt.hex()}${derived.hex()}")
+PY
+)"
 cat >"$PORTAL/.env" <<EOF
 NETA_COORDINATOR_URL=https://${COORDINATOR_PRIVATE_IP}:8443
 NETA_COORDINATOR_REQUEST_TIMEOUT_MS=5000

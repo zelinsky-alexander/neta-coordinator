@@ -25,7 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class RuleManagementService {
     private static final Set<String> CUSTOM_ENGINES = Set.of(
             "PROC-001", "PROC-002", "PROC-003", "PROC-004", "PROC-005",
-            "BEH-001", "NET-001", "NET-002", "NET-003", "NET-004",
+            "BEH-001", "NET-001", "NET-002", "NET-003", "NET-004", "NET-005",
             "DNS-001", "DNS-002", "DNS-003",
             "TLS-001", "TLS-002", "ROUTE-001");
     private static final Set<String> EXCLUSION_FIELDS = Set.of(

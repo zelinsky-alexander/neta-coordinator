@@ -198,7 +198,7 @@ ssh_host "$COORDINATOR_PUBLIC_IP" "sudo install -d -m 0700 -o ubuntu -g ubuntu /
 ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; cd '$PEER_LAB'; \
   nohup python3 common/server/beacon_server.py --bind 0.0.0.0 --port 18080 >/tmp/neta-lab-servers/001.log 2>&1 & \
   nohup python3 common/server/beacon_server.py --bind 0.0.0.0 --port 18443 --cert /tmp/neta-lab-servers/server.crt --key /tmp/neta-lab-servers/server.key >/tmp/neta-lab-servers/002.log 2>&1 & \
-  nohup python3 scenarios/003-large-download/server/large_download_server.py --bind 0.0.0.0 --port 18081 --size-mib 50 >/tmp/neta-lab-servers/003.log 2>&1 & \
+  nohup python3 scenarios/003-large-download/server/large_download_server.py --bind 0.0.0.0 --port 18081 --size-mib 300 >/tmp/neta-lab-servers/003.log 2>&1 & \
   nohup python3 scenarios/004-terminalfix-style-chain/server/lab_https_server.py --bind 0.0.0.0 --port 18444 --cert /tmp/neta-lab-servers/server.crt --key /tmp/neta-lab-servers/server.key --payload scenarios/004-terminalfix-style-chain/payload/neta-lab-004-payload.sh --payload-route /payload/neta-lab-004-payload.sh >/tmp/neta-lab-servers/004.log 2>&1 & \
   nohup python3 scenarios/005-lolbin-chain/server/lab_http_server.py --bind 0.0.0.0 --port 18580 >/tmp/neta-lab-servers/005.log 2>&1 & \
   nohup python3 common/server/tcp_lab_server.py --bind 0.0.0.0 --port 18447 --connections 1 --scenario NETA-LAB-007-peer >/tmp/neta-lab-servers/007.log 2>&1 & \
@@ -210,11 +210,12 @@ ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; cd '$PEER_LAB'; \
 
 log "running Linux NETA Lab command suite"
 set +e
-ssh_host "$AGENT_PUBLIC_IP" "sudo env NETA_LAB_TARGET_HOST='$COORDINATOR_PRIVATE_IP' NETA_LAB_SCENARIOS='$LAB_SCENARIOS' NETA_LAB_OUTPUT_DIR=/opt/neta-acceptance/lab-results NETA_LAB_CA_CERT=/opt/neta-acceptance/fleet-ca.crt bash /opt/neta-acceptance/src/lab/automation/run-linux-suite.sh --target-host '$COORDINATOR_PRIVATE_IP' --scenarios '$LAB_SCENARIOS' --output-dir /opt/neta-acceptance/lab-results" >"$OUT/logs/lab-suite.log" 2>&1
+ssh_host "$AGENT_PUBLIC_IP" "sudo env NETA_LAB_TARGET_HOST='$COORDINATOR_PRIVATE_IP' NETA_LAB_SCENARIOS='$LAB_SCENARIOS' NETA_LAB_OUTPUT_DIR=/opt/neta-acceptance/lab-results NETA_LAB_CA_CERT=/opt/neta-acceptance/fleet-ca.crt NETA_LAB_TLS_CONTEXT_PRELOAD=/usr/local/lib/neta/libneta_tls_context.so NETA_LAB_TLS_CONTEXT_SOCKET=@neta-agent-tls-service bash /opt/neta-acceptance/src/lab/automation/run-linux-suite.sh --target-host '$COORDINATOR_PRIVATE_IP' --scenarios '$LAB_SCENARIOS' --output-dir /opt/neta-acceptance/lab-results" >"$OUT/logs/lab-suite.log" 2>&1
 LAB_RC=$?
 set -e
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.tsv "$OUT/lab/summary.tsv" || true
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.json "$OUT/lab/summary.json" || true
+scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/contracts.json "$OUT/lab/contracts.json" || true
 
 run_peer_scenario() {
   local id="$1" agent_cmd="$2" peer_cmd="$3" delay="${4:-1}"
@@ -255,6 +256,28 @@ ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; cd /opt/neta-acceptance/src/coordinat
 ssh_host "$AGENT_PUBLIC_IP" "sudo /usr/local/bin/neta-agent fleet heartbeat --state-dir /var/lib/neta/identity" >>"$OUT/logs/coordinator-restart.log" 2>&1
 ssh_host "$COORDINATOR_PUBLIC_IP" "cd /opt/neta-acceptance/src/coordinator; sudo env NETA_COORDINATOR_URL=https://127.0.0.1:8443 NETA_OPERATOR_CA=/opt/neta-acceptance/pki/fleet-ca.crt bash ./neta status; sudo env NETA_COORDINATOR_URL=https://127.0.0.1:8443 NETA_OPERATOR_CA=/opt/neta-acceptance/pki/fleet-ca.crt bash ./neta endpoints; sudo env NETA_COORDINATOR_URL=https://127.0.0.1:8443 NETA_OPERATOR_CA=/opt/neta-acceptance/pki/fleet-ca.crt bash ./neta findings --limit 100" >"$OUT/logs/coordinator-state.log" 2>&1
 ssh_host "$COORDINATOR_PUBLIC_IP" "cd /opt/neta-acceptance/src/portal && sudo bash ./deploy/health-check.sh" >"$OUT/logs/portal-health.log" 2>&1
+
+log "collecting and comparing lab evidence, findings and Portal visibility"
+scp_to "$SCRIPT_ROOT/remote/collect-agent-lab-evidence.py" "$AGENT_PUBLIC_IP" /tmp/collect-agent-lab-evidence.py
+ssh_host "$AGENT_PUBLIC_IP" "sudo python3 /tmp/collect-agent-lab-evidence.py --database /var/lib/neta/neta.db --contracts /opt/neta-acceptance/lab-results/contracts.json --output /opt/neta-acceptance/lab-results/agent-evidence.json"
+scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/agent-evidence.json "$OUT/lab/agent-evidence.json"
+
+ssh_host "$COORDINATOR_PUBLIC_IP" "sudo curl -fsS --cacert /opt/neta-acceptance/pki/fleet-ca.crt --cert /opt/neta-acceptance/pki/portal-client.crt --key /opt/neta-acceptance/pki/portal-client.key -H 'X-NETA-Portal-Service-Token: $PORTAL_SERVICE_TOKEN' -H 'X-NETA-Portal-Service: neta-acceptance' -H 'X-NETA-Actor: acceptance' -H 'X-NETA-Actor-Role: ADMIN' 'https://127.0.0.1:8443/api/v1/findings?limit=100'" >"$OUT/lab/coordinator-findings.json"
+ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; header=\$(mktemp); trap 'rm -f \"\$header\"' EXIT; curl -fsS -D \"\$header\" -o /tmp/neta-portal-login.json -H 'Content-Type: application/json' --data '{\"username\":\"acceptance\",\"password\":\"$PORTAL_PASSWORD\"}' http://127.0.0.1:8080/portal-api/auth/login; cookie=\$(sed -n 's/^[Ss]et-[Cc]ookie: *\(neta_session=[^;]*\).*/\1/p' \"\$header\" | tr -d '\r' | head -n1); test -n \"\$cookie\"; curl -fsS -H \"Cookie: \$cookie\" 'http://127.0.0.1:8080/portal-api/findings?limit=100'" >"$OUT/lab/portal-findings.json"
+ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; header=\$(mktemp); trap 'rm -f \"\$header\"' EXIT; curl -fsS -D \"\$header\" -o /tmp/neta-portal-login.json -H 'Content-Type: application/json' --data '{\"username\":\"acceptance\",\"password\":\"$PORTAL_PASSWORD\"}' http://127.0.0.1:8080/portal-api/auth/login; cookie=\$(sed -n 's/^[Ss]et-[Cc]ookie: *\(neta_session=[^;]*\).*/\1/p' \"\$header\" | tr -d '\r' | head -n1); test -n \"\$cookie\"; curl -fsS -H \"Cookie: \$cookie\" 'http://127.0.0.1:8080/portal-api/findings?limit=100&status=ACTIVE'" >"$OUT/lab/portal-active-findings.json"
+
+set +e
+python3 "$SCRIPT_ROOT/verify_lab_acceptance.py" \
+  --contracts "$OUT/lab/contracts.json" \
+  --ground-truth "$OUT/lab/summary.json" \
+  --peer-ground-truth "$OUT/lab/peer-summary.tsv" \
+  --coordinator-findings "$OUT/lab/coordinator-findings.json" \
+  --portal-findings "$OUT/lab/portal-findings.json" \
+  --portal-active-findings "$OUT/lab/portal-active-findings.json" \
+  --agent-evidence "$OUT/lab/agent-evidence.json" \
+  --scenarios "$LAB_SCENARIOS" --output-dir "$OUT/lab"
+ACCEPTANCE_RC=$?
+set -e
 
 # Prove the application-layer client-certificate gate specifically. Sending `{}`
 # would only prove that malformed protocol input gets a 4xx because envelope
@@ -313,7 +336,7 @@ ssh_host "$COORDINATOR_PUBLIC_IP" "cd /opt/neta-acceptance/src/portal && sudo do
 ssh_host "$COORDINATOR_PUBLIC_IP" "cat /tmp/neta-lab-servers/*.log 2>/dev/null || true" >"$OUT/logs/lab-peer-servers.log" 2>&1 || true
 
 STATUS=PASS
-((LAB_RC == 0 && PEER_RC == 0 && SECURITY_RC == 0)) || STATUS=FAIL
+((LAB_RC == 0 && PEER_RC == 0 && SECURITY_RC == 0 && ACCEPTANCE_RC == 0)) || STATUS=FAIL
 cat >"$OUT/ACCEPTANCE.md" <<EOF2
 # NETA Full-Cycle Linux Acceptance
 
@@ -337,12 +360,13 @@ cat >"$OUT/ACCEPTANCE.md" <<EOF2
 - Centrally managed rules update: PASS
 - Linux NETA Lab command suite: $([[ $LAB_RC -eq 0 ]] && echo PASS || echo FAIL)
 - Peer-coordinated inbound scenarios: $([[ $PEER_RC -eq 0 ]] && echo PASS || echo FAIL)
+- Lab evidence-to-Portal contract: $([[ $ACCEPTANCE_RC -eq 0 ]] && echo PASS || echo FAIL)
 - Agent restart/reconnect: PASS
 - Coordinator restart/agent recovery: PASS
 - Unauthenticated message-ingestion HTTP rejection: $([[ $SECURITY_RC -eq 0 ]] && echo PASS || echo FAIL)
 - Portal post-test health: PASS
 
-See \`production-parity.txt\`, \`lab/summary.tsv\`, \`lab/peer-summary.tsv\`, revision files, and \`logs/\` for evidence.
+See \`production-parity.txt\`, \`lab/summary.tsv\`, \`lab/peer-summary.tsv\`, \`lab/expected-vs-actual.json\`, \`lab/expected-vs-actual.tsv\`, revision files, and \`logs/\` for evidence.
 EOF2
 
 python3 - "$OUT" "$STATUS" <<'PY'
@@ -354,9 +378,10 @@ PY
 
 cat >"$OUT/junit.xml" <<EOF2
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="neta-full-cycle-linux" tests="3" failures="$(( (LAB_RC!=0) + (PEER_RC!=0) + (SECURITY_RC!=0) ))">
+<testsuite name="neta-full-cycle-linux" tests="4" failures="$(( (LAB_RC!=0) + (PEER_RC!=0) + (SECURITY_RC!=0) + (ACCEPTANCE_RC!=0) ))">
   <testcase classname="neta.acceptance" name="lab-command-suite">$([[ $LAB_RC -eq 0 ]] || echo '<failure message="lab command suite failed"/>')</testcase>
   <testcase classname="neta.acceptance" name="peer-inbound-suite">$([[ $PEER_RC -eq 0 ]] || echo '<failure message="peer inbound suite failed"/>')</testcase>
+  <testcase classname="neta.acceptance" name="lab-evidence-to-portal">$([[ $ACCEPTANCE_RC -eq 0 ]] || echo '<failure message="lab evidence-to-Portal contract failed"/>')</testcase>
   <testcase classname="neta.acceptance" name="mtls-negative-control">$([[ $SECURITY_RC -eq 0 ]] || echo '<failure message="unauthenticated ingestion was not proven rejected"/>')</testcase>
 </testsuite>
 EOF2
