@@ -1,5 +1,6 @@
 package dev.neta.coordinator.api;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import dev.neta.coordinator.enrollment.EnrollmentService;
 import dev.neta.coordinator.enrollment.EnrollmentService.EnrollmentRequest;
@@ -58,6 +59,7 @@ public class CoordinatorController {
     public record MessageResponse(String protocol, int schemaVersion, String messageType,
                                   int ackVersion, String messageId, long sequence,
                                   String idempotencyKey, String payloadHash,
-                                  String status, Instant receivedAt,
+                                  String status,
+                                  @JsonFormat(shape = JsonFormat.Shape.STRING) Instant receivedAt,
                                   AgentUpgradeInstruction upgrade, RuleControl rules) {}
 }
