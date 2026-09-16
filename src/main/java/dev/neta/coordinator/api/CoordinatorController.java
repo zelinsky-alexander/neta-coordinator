@@ -49,10 +49,15 @@ public class CoordinatorController {
         if (envelope.messageType() == MessageType.HEARTBEAT || envelope.messageType() == MessageType.AGENT_HELLO) {
             rules = ruleConvergence.controlForAgent(envelope.agentId());
         }
-        return new MessageResponse(result.messageId(), result.status(), result.receivedAt(), result.upgrade(), rules);
+        return new MessageResponse("neta-agent/1", 1, "Ack", 1,
+                result.messageId(), result.sequence(), result.idempotencyKey(),
+                result.payloadHash(), result.status(), result.receivedAt(), result.upgrade(), rules);
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record MessageResponse(String messageId, String status, Instant receivedAt,
+    public record MessageResponse(String protocol, int schemaVersion, String messageType,
+                                  int ackVersion, String messageId, long sequence,
+                                  String idempotencyKey, String payloadHash,
+                                  String status, Instant receivedAt,
                                   AgentUpgradeInstruction upgrade, RuleControl rules) {}
 }

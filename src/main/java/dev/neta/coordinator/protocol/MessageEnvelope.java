@@ -14,6 +14,7 @@ public record MessageEnvelope(
         @JsonProperty("expires_at") Instant expiresAt,
         long sequence,
         @JsonProperty("correlation_id") String correlationId,
+        @JsonProperty("idempotency_key") String idempotencyKey,
         @JsonProperty("payload_hash") String payloadHash,
         JsonNode payload,
         SignatureBlock signature) {}

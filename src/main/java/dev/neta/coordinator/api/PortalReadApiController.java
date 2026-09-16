@@ -280,7 +280,7 @@ public class PortalReadApiController {
         catch (Exception ignored) { return null; }
     }
 
-    private String findingAttribute(String changes,String prefix,String fallback) {
+    String findingAttribute(String changes,String prefix,String fallback) {
         if(!text(changes)) return fallback;
         try {
             JsonNode node=mapper.readTree(changes);

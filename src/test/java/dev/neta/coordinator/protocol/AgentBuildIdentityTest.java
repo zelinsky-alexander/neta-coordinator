@@ -126,6 +126,7 @@ class AgentBuildIdentityTest {
                 created.plusSeconds(60),
                 1,
                 null,
+                null,
                 "sha256:" + "b".repeat(64),
                 payload,
                 new SignatureBlock("ed25519", "key-1", "placeholder"));

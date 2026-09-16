@@ -210,7 +210,7 @@ ssh_host "$COORDINATOR_PUBLIC_IP" "set -e; cd '$PEER_LAB'; \
 
 log "running Linux NETA Lab command suite"
 set +e
-ssh_host "$AGENT_PUBLIC_IP" "sudo env NETA_LAB_TARGET_HOST='$COORDINATOR_PRIVATE_IP' NETA_LAB_SCENARIOS='$LAB_SCENARIOS' NETA_LAB_OUTPUT_DIR=/opt/neta-acceptance/lab-results NETA_LAB_CA_CERT=/opt/neta-acceptance/fleet-ca.crt NETA_LAB_TLS_CONTEXT_PRELOAD=/usr/local/lib/neta/libneta_tls_context.so NETA_LAB_TLS_CONTEXT_SOCKET=@neta-agent-tls-service bash /opt/neta-acceptance/src/lab/automation/run-linux-suite.sh --target-host '$COORDINATOR_PRIVATE_IP' --scenarios '$LAB_SCENARIOS' --output-dir /opt/neta-acceptance/lab-results" >"$OUT/logs/lab-suite.log" 2>&1
+ssh_host "$AGENT_PUBLIC_IP" "sudo env NETA_LAB_TARGET_HOST='$COORDINATOR_PRIVATE_IP' NETA_LAB_SCENARIOS='$LAB_SCENARIOS' NETA_LAB_OUTPUT_DIR=/opt/neta-acceptance/lab-results NETA_LAB_CA_CERT=/opt/neta-acceptance/fleet-ca.crt NETA_LAB_TLS_CONTEXT_PRELOAD=/usr/local/lib/neta/libneta_tls_context.so NETA_LAB_TLS_CONTEXT_SOCKET=@neta-agent-tls-service NETA_AGENT_BIN=/usr/local/bin/neta-agent NETA_AGENT_DB=/var/lib/neta/neta.db bash /opt/neta-acceptance/src/lab/automation/run-linux-suite.sh --target-host '$COORDINATOR_PRIVATE_IP' --scenarios '$LAB_SCENARIOS' --output-dir /opt/neta-acceptance/lab-results" >"$OUT/logs/lab-suite.log" 2>&1
 LAB_RC=$?
 set -e
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.tsv "$OUT/lab/summary.tsv" || true

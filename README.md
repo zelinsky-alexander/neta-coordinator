@@ -16,6 +16,7 @@ Implemented now:
 - NAP/1 envelope parsing and structural validation;
 - expiry, clock-skew and maximum-message-lifetime policy;
 - per-agent monotonic sequence and message replay protection;
+- transactional NAP/1 idempotency receipts and explicit commit acknowledgements;
 - compact `FindingAnnouncement` persistence and target indexing;
 - `CorroborationResponse` persistence only for known requests;
 - `EvidenceSummary` persistence;
@@ -144,9 +145,14 @@ The initial schema separates:
 - indexed `findings`;
 - `corroboration_requests` / `corroboration_responses`;
 - `evidence_summaries`;
+- `ingest_receipts`, keyed by agent and stable logical event id;
 - `audit_events`.
 
 PostgreSQL uniqueness constraints enforce per-agent message-id and sequence replay protection at the storage boundary as well as in service logic.
+For reliable finding and evidence delivery, semantic persistence and its
+`ingest_receipts` row commit in the same transaction. The response identifies the
+exact transport attempt and logical event; exact retries return
+`ALREADY_ACCEPTED` without applying the semantic payload twice.
 
 ## Dependencies and licensing
 

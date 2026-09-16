@@ -34,8 +34,22 @@ class EnvelopeValidatorTest {
         assertThrows(ProtocolException.class, () -> validator.validate(envelope(MessageType.CORROBORATION_REQUEST, payload, NOW, NOW.plusSeconds(60))));
     }
 
+    @Test void rejectsMalformedIdempotencyKey() throws Exception {
+        var payload = mapper.readTree("""
+                {"finding_id":"FIND-1","target":{"host":"api.example","port":443},
+                 "evidence_root":"sha256:x"}
+                """);
+        var valid = envelope(MessageType.FINDING_ANNOUNCEMENT, payload, NOW, NOW.plusSeconds(60));
+        var malformed = new MessageEnvelope(
+                valid.protocol(), valid.schemaVersion(), valid.messageId(), valid.messageType(),
+                valid.agentId(), valid.createdAt(), valid.expiresAt(), valid.sequence(),
+                valid.correlationId(), "bad key with spaces", valid.payloadHash(),
+                valid.payload(), valid.signature());
+        assertThrows(ProtocolException.class, () -> validator.validate(malformed));
+    }
+
     private MessageEnvelope envelope(MessageType type, com.fasterxml.jackson.databind.JsonNode payload, Instant created, Instant expires) {
-        return new MessageEnvelope("neta-agent/1", 1, "MSG-1", type, "AGENT-1", created, expires, 1, null,
+        return new MessageEnvelope("neta-agent/1", 1, "MSG-1", type, "AGENT-1", created, expires, 1, null, null,
                 "sha256:" + "a".repeat(64), payload, new SignatureBlock("ed25519", "key-1", "placeholder"));
     }
 }
