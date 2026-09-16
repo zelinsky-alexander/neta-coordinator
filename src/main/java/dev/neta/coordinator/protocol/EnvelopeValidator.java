@@ -28,6 +28,9 @@ public final class EnvelopeValidator {
         requireText(e.agentId(), "agent_id");
         if (e.messageType() == null || !AGENT_TO_COORDINATOR.contains(e.messageType())) throw ProtocolException.badRequest("message_type is not accepted from agents");
         if (e.sequence() < 0) throw ProtocolException.badRequest("sequence must be non-negative");
+        if (e.idempotencyKey() != null &&
+                !e.idempotencyKey().matches("[A-Za-z0-9._:-]{1,160}"))
+            throw ProtocolException.badRequest("idempotency_key has an invalid format");
         if (e.createdAt() == null || e.expiresAt() == null) throw ProtocolException.badRequest("created_at and expires_at are required");
         Instant now = clock.instant();
         if (e.expiresAt().isBefore(now) || e.expiresAt().equals(now)) throw ProtocolException.badRequest("message has expired");

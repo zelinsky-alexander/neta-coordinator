@@ -34,6 +34,7 @@ public class StorageOperatorController {
                 table("incident_findings", null),
                 table("endpoint_contact_history", "contact_at"),
                 table("protocol_messages", "received_at"),
+                table("ingest_receipts", "committed_at"),
                 table("audit_events", "created_at"),
                 table("evidence_summaries", "received_at"),
                 table("corroboration_requests", "created_at"),

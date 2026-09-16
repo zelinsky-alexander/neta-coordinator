@@ -1,6 +1,5 @@
 package dev.neta.coordinator.ingest;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -88,6 +87,18 @@ public class MessageIngestService {
             throw ProtocolException.unauthorized("enrolled agent certificate is not yet valid");
         if (agent.certificateNotAfter() != null && !now.isBefore(agent.certificateNotAfter()))
             throw ProtocolException.unauthorized("enrolled agent certificate is expired");
+
+        IngestReceipt existingReceipt = findReceipt(envelope);
+        if (existingReceipt != null) {
+            if (!existingReceipt.payloadHash().equalsIgnoreCase(envelope.payloadHash()) ||
+                    !existingReceipt.messageType().equals(envelope.messageType().wireName())) {
+                throw ProtocolException.conflict(
+                        "idempotency_key was already committed with different content");
+            }
+            return new IngestResult(
+                    envelope.messageId(), envelope.sequence(), envelope.idempotencyKey(),
+                    envelope.payloadHash(), "ALREADY_ACCEPTED", existingReceipt.committedAt(), null);
+        }
         if (envelope.sequence() <= agent.lastSequence())
             throw ProtocolException.conflict("sequence is not newer than the last accepted message");
 
@@ -99,6 +110,7 @@ public class MessageIngestService {
             upgradeLifecycle.ingestProgress(envelope.agentId(), envelope.payload());
         }
         persistContact(envelope);
+        persistReceipt(envelope);
         persistBuildIdentity(envelope.agentId(), buildIdentity);
         if (buildIdentity != null && (heartbeat || envelope.messageType() == MessageType.AGENT_HELLO)) {
             upgradeLifecycle.reconcileReportedBuild(envelope.agentId(), buildIdentity);
@@ -118,7 +130,33 @@ public class MessageIngestService {
         if (heartbeat || envelope.messageType() == MessageType.AGENT_HELLO) {
             upgrade = upgradeDelivery.instructionFor(envelope.agentId()).orElse(null);
         }
-        return new IngestResult(envelope.messageId(), "ACCEPTED", Instant.now(), upgrade);
+        return new IngestResult(
+                envelope.messageId(), envelope.sequence(), envelope.idempotencyKey(),
+                envelope.payloadHash(), "ACCEPTED", Instant.now(), upgrade);
+    }
+
+    private IngestReceipt findReceipt(MessageEnvelope envelope) {
+        if (envelope.idempotencyKey() == null || envelope.idempotencyKey().isBlank()) return null;
+        var receipts = jdbc.query("""
+                SELECT payload_hash,message_type,committed_at
+                FROM ingest_receipts
+                WHERE agent_id=? AND idempotency_key=?
+                """, (rs, row) -> new IngestReceipt(
+                        rs.getString("payload_hash"), rs.getString("message_type"),
+                        rs.getTimestamp("committed_at").toInstant()),
+                envelope.agentId(), envelope.idempotencyKey());
+        return receipts.isEmpty() ? null : receipts.getFirst();
+    }
+
+    private void persistReceipt(MessageEnvelope envelope) {
+        if (envelope.idempotencyKey() == null || envelope.idempotencyKey().isBlank()) return;
+        jdbc.update("""
+                INSERT INTO ingest_receipts(
+                    agent_id,idempotency_key,payload_hash,message_type,
+                    first_message_id,first_sequence,result_status)
+                VALUES (?,?,?,?,?,?,'ACCEPTED')
+                """, envelope.agentId(), envelope.idempotencyKey(), envelope.payloadHash(),
+                envelope.messageType().wireName(), envelope.messageId(), envelope.sequence());
     }
 
     private void persistBuildIdentity(String agentId, AgentBuildIdentity build) {
@@ -271,6 +309,14 @@ public class MessageIngestService {
     private record AgentState(String certificateSha256, String status, long lastSequence,
                               Instant certificateNotBefore, Instant certificateNotAfter) {}
 
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record IngestResult(String messageId, String status, Instant receivedAt, AgentUpgradeInstruction upgrade) {}
+    private record IngestReceipt(String payloadHash, String messageType, Instant committedAt) {}
+
+    public record IngestResult(
+            String messageId,
+            long sequence,
+            String idempotencyKey,
+            String payloadHash,
+            String status,
+            Instant receivedAt,
+            AgentUpgradeInstruction upgrade) {}
 }
