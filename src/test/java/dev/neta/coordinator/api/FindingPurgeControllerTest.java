@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -54,7 +53,7 @@ class FindingPurgeControllerTest {
         verify(jdbc).update(eq("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?"), eq("F-1"));
         verify(jdbc).update(eq("DELETE FROM incident_findings WHERE finding_id=?"), eq("F-1"));
         verify(jdbc).update(contains("DELETE FROM incidents"));
-        verify(jdbc).update(contains("INSERT INTO audit_events"), eq("FINDING_PURGED"), isNull(),
+        verify(jdbc).update(contains("INSERT INTO audit_events"), eq("FINDING_PURGED"),
                 contains("\"actor\":\"alex\""));
         verify(incidents).syncAll();
     }
