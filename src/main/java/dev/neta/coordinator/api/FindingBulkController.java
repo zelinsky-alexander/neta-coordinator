@@ -2,9 +2,10 @@ package dev.neta.coordinator.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.neta.coordinator.incident.IncidentService;
+import dev.neta.coordinator.finding.FindingQueryService;
+import dev.neta.coordinator.security.PortalAuthorization;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,37 +25,25 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/v1/operator")
 public class FindingBulkController {
     private static final String ADMIN_HEADER = "X-NETA-Admin-Token";
-    private static final long MAX_AGE_SECONDS = 10L * 365 * 24 * 60 * 60;
-    private static final String FINDING_ASSESSMENT_SQL = """
-            CASE
-              WHEN upper(COALESCE(f.subject_type,''))='PROCESS' THEN 'BEHAVIORAL_PATTERN'
-              WHEN upper(COALESCE(NULLIF(f.rule_id,''),
-                   (SELECT trim(substr(entry,length('Finding type:')+1))
-                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
-                     WHERE lower(entry) LIKE 'finding type:%' LIMIT 1),
-                   CASE WHEN f.finding_id LIKE 'FINDING-BEHAVIOR-%' THEN 'BEHAVIOR'
-                        WHEN f.finding_id LIKE 'FINDING-TRANSFER-%' THEN 'TRANSFER_BEHAVIOR'
-                        ELSE 'CONNECTION_ASSURANCE' END))='CONNECTION_ASSURANCE'
-                THEN 'PEER_' || COALESCE(NULLIF(upper(f.trust_verdict),''),'UNKNOWN')
-              ELSE 'INTENT_' || COALESCE(NULLIF(upper(
-                   (SELECT trim(substr(entry,length('Malicious intent:')+1))
-                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
-                     WHERE lower(entry) LIKE 'malicious intent:%' LIMIT 1)),''),'UNKNOWN')
-            END
-            """;
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
     private final IncidentService incidents;
+    private final PortalAuthorization portalAuthorization;
+    private final FindingQueryService findingQueries;
     private final String adminToken;
 
     public FindingBulkController(JdbcTemplate jdbc,
                                  ObjectMapper mapper,
                                  IncidentService incidents,
+                                 PortalAuthorization portalAuthorization,
+                                 FindingQueryService findingQueries,
                                  @Value("${NETA_OPERATOR_ADMIN_TOKEN:}") String adminToken) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.incidents = incidents;
+        this.portalAuthorization = portalAuthorization;
+        this.findingQueries = findingQueries;
         this.adminToken = adminToken == null ? "" : adminToken;
     }
 
@@ -105,6 +94,12 @@ public class FindingBulkController {
     @PostMapping("/finding-bulk-purge")
     @Transactional
     public BulkResult purge(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                            @RequestHeader(value = "X-NETA-Portal-Service-Token", required = false) String portalToken,
+                            @RequestHeader(value = "X-NETA-Actor", required = false) String portalActor,
+                            @RequestHeader(value = "X-NETA-Actor-Role", required = false) String portalRole,
+                            @RequestHeader(value = "X-NETA-Portal-Service", required = false) String portalService,
+                            @RequestHeader(value = "X-Request-ID", required = false) String requestId,
+                            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
                             @RequestParam(required = false) String agent,
                             @RequestParam(required = false) String severity,
                             @RequestParam(required = false) String rule,
@@ -112,19 +107,60 @@ public class FindingBulkController {
                             @RequestParam(required = false) String assessment,
                             @RequestParam(required = false) Long olderThanSeconds,
                             @RequestParam(required = false) Long newerThanSeconds,
-                            @RequestParam String reason) {
+                            @RequestParam String reason,
+                            @RequestParam(defaultValue = "false") boolean confirmed) {
         requireAdmin(suppliedToken);
+        String actor = authorizePurge(portalToken, portalActor, portalRole, portalService,
+                requestId, idempotencyKey);
+        requireConfirmation(confirmed);
         requireReason(reason);
         Filter filter = filter(agent, severity, rule, status, assessment, olderThanSeconds, newerThanSeconds);
         requireSelectiveFilter(filter);
+        BulkResult replay = priorPurge(idempotencyKey);
+        if (replay != null) return replay;
         long count = count(filter);
-        if (count == 0) return new BulkResult("PURGE", 0, "No findings matched the filter.");
+        if (count == 0) {
+            audit("FINDINGS_BULK_PURGED", filter, reason, 0, actor, requestId, idempotencyKey);
+            return new BulkResult("PURGE", 0, "No findings matched the filter.");
+        }
         clearFindingReferences(filter);
         int changed = jdbc.update("DELETE FROM findings f " + filter.where(), filter.args().toArray());
         removeEmptyIncidents();
         incidents.syncAll();
-        audit("FINDINGS_BULK_PURGED", filter, reason, changed);
+        audit("FINDINGS_BULK_PURGED", filter, reason, changed, actor, requestId, idempotencyKey);
         return new BulkResult("PURGE", changed, "Permanently purged " + changed + " finding(s).");
+    }
+
+    @PostMapping("/finding-purge")
+    @Transactional
+    public BulkResult purgeOne(@RequestHeader(value = ADMIN_HEADER, required = false) String suppliedToken,
+                               @RequestHeader(value = "X-NETA-Portal-Service-Token", required = false) String portalToken,
+                               @RequestHeader(value = "X-NETA-Actor", required = false) String portalActor,
+                               @RequestHeader(value = "X-NETA-Actor-Role", required = false) String portalRole,
+                               @RequestHeader(value = "X-NETA-Portal-Service", required = false) String portalService,
+                               @RequestHeader(value = "X-Request-ID", required = false) String requestId,
+                               @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+                               @RequestParam("id") String findingId,
+                               @RequestParam String reason,
+                               @RequestParam(defaultValue = "false") boolean confirmed) {
+        requireAdmin(suppliedToken);
+        String actor = authorizePurge(portalToken, portalActor, portalRole, portalService,
+                requestId, idempotencyKey);
+        requireConfirmation(confirmed);
+        requireReason(reason);
+        if (!text(findingId)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "finding id is required");
+        BulkResult replay = priorPurge(idempotencyKey);
+        if (replay != null) return replay;
+        jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?", findingId.trim());
+        jdbc.update("DELETE FROM incident_findings WHERE finding_id=?", findingId.trim());
+        int changed = jdbc.update("DELETE FROM findings WHERE finding_id=?", findingId.trim());
+        removeEmptyIncidents();
+        incidents.syncAll();
+        Filter selection = new Filter(null, null, null, null, null, null, null,
+                " WHERE f.finding_id=?", List.of(findingId.trim()));
+        audit("FINDING_PURGED", selection, reason, changed, actor, requestId, idempotencyKey);
+        return new BulkResult("PURGE", changed, changed == 0
+                ? "Finding was already absent." : "Permanently purged finding " + findingId.trim() + ".");
     }
 
     private long count(Filter filter) {
@@ -158,10 +194,20 @@ public class FindingBulkController {
     }
 
     private void audit(String eventType, Filter filter, String reason, int affected) {
+        audit(eventType, filter, reason, affected, "operator-cli", null, null);
+    }
+
+    private void audit(String eventType, Filter filter, String reason, int affected, String actor,
+                       String requestId, String idempotencyKey) {
         try {
             Map<String, Object> details = new LinkedHashMap<>();
             details.put("affected", affected);
             details.put("reason", reason);
+            details.put("actor", actor);
+            details.put("request_id", requestId);
+            details.put("idempotency_key", idempotencyKey);
+            details.put("selection_sql", filter.where());
+            details.put("selection_args", filter.args());
             if (text(filter.agent())) details.put("agent", filter.agent());
             if (text(filter.severity())) details.put("severity", filter.severity());
             if (text(filter.rule())) details.put("rule", filter.rule());
@@ -176,33 +222,40 @@ public class FindingBulkController {
         }
     }
 
-    private Filter filter(String agent, String severity, String rule, String status, String assessment,
-                          Long olderThanSeconds, Long newerThanSeconds) {
-        validateAge(olderThanSeconds, newerThanSeconds);
-        List<Object> args = new ArrayList<>();
-        StringBuilder where = new StringBuilder(" WHERE 1=1");
-        if (text(agent)) {
-            where.append(" AND (f.agent_id=? OR lower(COALESCE((SELECT ax.display_name FROM agents ax WHERE ax.agent_id=f.agent_id),''))=lower(?))");
-            args.add(agent.trim()); args.add(agent.trim());
-        }
-        if (text(severity)) { where.append(" AND upper(COALESCE(f.severity,''))=upper(?)"); args.add(severity.trim()); }
-        if (text(rule)) { where.append(" AND upper(COALESCE(f.rule_id,''))=upper(?)"); args.add(rule.trim()); }
-        if (text(status)) { where.append(" AND upper(COALESCE(f.status,''))=upper(?)"); args.add(status.trim()); }
-        if (text(assessment)) { where.append(" AND upper((").append(FINDING_ASSESSMENT_SQL).append("))=upper(?)"); args.add(assessment.trim()); }
-        if (olderThanSeconds != null) { where.append(" AND f.last_seen < now() - (? * interval '1 second')"); args.add(olderThanSeconds); }
-        if (newerThanSeconds != null) { where.append(" AND f.last_seen >= now() - (? * interval '1 second')"); args.add(newerThanSeconds); }
-        return new Filter(normalize(agent), normalize(severity), normalize(rule), normalize(status), normalize(assessment),
-                olderThanSeconds, newerThanSeconds, where.toString(), List.copyOf(args));
+    private BulkResult priorPurge(String idempotencyKey) {
+        if (!text(idempotencyKey)) return null;
+        List<Integer> affected = jdbc.query("""
+                SELECT COALESCE((details->>'affected')::integer,0)
+                FROM audit_events
+                WHERE event_type IN ('FINDING_PURGED','FINDINGS_BULK_PURGED')
+                  AND details->>'idempotency_key'=?
+                ORDER BY created_at DESC LIMIT 1
+                """, (rs, ignored) -> rs.getInt(1), idempotencyKey);
+        return affected.isEmpty() ? null : new BulkResult("PURGE", affected.getFirst(),
+                "Purge request was already completed; returning the recorded result.");
     }
 
-    private static void validateAge(Long olderThanSeconds, Long newerThanSeconds) {
-        if (olderThanSeconds != null && newerThanSeconds != null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"olderThanSeconds and newerThanSeconds are mutually exclusive");
-        }
-        Long value = olderThanSeconds != null ? olderThanSeconds : newerThanSeconds;
-        if (value != null && (value <= 0 || value > MAX_AGE_SECONDS)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"finding age must be between 1 and " + MAX_AGE_SECONDS);
-        }
+    private String authorizePurge(String portalToken, String actor, String role, String service,
+                                  String requestId, String idempotencyKey) {
+        if (!text(idempotencyKey)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                "Idempotency-Key is required for permanent purge");
+        if (!text(portalToken)) return "operator-cli";
+        return portalAuthorization.require(portalToken, actor, role, service, requestId,
+                idempotencyKey, PortalAuthorization.Role.ADMIN).user();
+    }
+
+    private static void requireConfirmation(boolean confirmed) {
+        if (!confirmed) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                "permanent purge requires confirmed=true");
+    }
+
+    private Filter filter(String agent, String severity, String rule, String status, String assessment,
+                          Long olderThanSeconds, Long newerThanSeconds) {
+        FindingQueryService.Selection selection = findingQueries.selection(new FindingQueryService.Filter(
+                agent, null, null, status, null, severity, rule, assessment,
+                olderThanSeconds, newerThanSeconds));
+        return new Filter(normalize(agent), normalize(severity), normalize(rule), normalize(status), normalize(assessment),
+                olderThanSeconds, newerThanSeconds, selection.where(), selection.args());
     }
 
     private static void requireSelectiveFilter(Filter filter) {

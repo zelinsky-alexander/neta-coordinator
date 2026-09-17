@@ -2,6 +2,7 @@ package dev.neta.coordinator.cli;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.neta.coordinator.finding.FindingQueryService;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
@@ -20,10 +21,13 @@ public class CoordinatorCliRunner implements ApplicationRunner {
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private final FindingQueryService findingQueries;
 
-    public CoordinatorCliRunner(JdbcTemplate jdbc, ObjectMapper mapper) {
+    public CoordinatorCliRunner(JdbcTemplate jdbc, ObjectMapper mapper,
+                                FindingQueryService findingQueries) {
         this.jdbc = jdbc;
         this.mapper = mapper;
+        this.findingQueries = findingQueries;
     }
 
     public static boolean isCliInvocation(String[] args) {
@@ -89,55 +93,36 @@ public class CoordinatorCliRunner implements ApplicationRunner {
     }
 
     private void printFindings(int limit) {
-        FindingTotals totals = jdbc.queryForObject("""
-                SELECT count(*) AS total,
-                       count(*) FILTER (WHERE status='ACTIVE') AS active,
-                       count(*) FILTER (WHERE trust_verdict='SUSPICIOUS') AS suspicious
-                FROM findings
-                """, (rs, rowNum) -> new FindingTotals(
-                rs.getLong("total"), rs.getLong("active"), rs.getLong("suspicious")));
+        FindingQueryService.Summary totals = findingQueries.summary();
+        System.out.println("Findings");
+        System.out.println("=================================");
+        System.out.printf("%-24s %8d%n", "Retained", totals.retained());
+        System.out.printf("%-24s %8d%n", "Current actionable", totals.currentActionable());
+        System.out.printf("%-24s %8d%n", "Active historical", totals.activeHistorical());
+        System.out.printf("%-24s %8d%n%n", "Recent candidates", totals.recentCandidates());
+        System.out.println("Severity");
+        System.out.printf("  %-22s %8d%n", "Critical", totals.critical());
+        System.out.printf("  %-22s %8d%n", "High", totals.high());
+        System.out.printf("  %-22s %8d%n", "Medium", totals.medium());
+        System.out.printf("  %-22s %8d%n%n", "Low", totals.low());
 
-        if (totals == null) totals = new FindingTotals(0, 0, 0);
-        System.out.printf("Findings: total=%d active=%d suspicious=%d%n%n",
-                totals.total(), totals.active(), totals.suspicious());
+        List<FindingQueryService.Finding> rows = findingQueries.search(
+                FindingQueryService.Filter.defaults(),
+                new FindingQueryService.PageRequest(limit, 0, "last_seen", false, null, null)).items();
 
-        List<FindingRow> rows = jdbc.query("""
-                SELECT f.finding_id, f.agent_id, a.display_name,
-                       f.target_host, f.target_port,
-                       f.trust_verdict, f.performance_verdict,
-                       f.occurrence_count, f.status, f.last_seen
-                FROM findings f
-                JOIN agents a ON a.agent_id=f.agent_id
-                ORDER BY f.last_seen DESC
-                LIMIT ?
-                """, (rs, rowNum) -> new FindingRow(
-                rs.getString("finding_id"),
-                rs.getString("agent_id"),
-                rs.getString("display_name"),
-                rs.getString("target_host"),
-                rs.getInt("target_port"),
-                valueOrDash(rs.getString("trust_verdict")),
-                valueOrDash(rs.getString("performance_verdict")),
-                rs.getLong("occurrence_count"),
-                rs.getString("status"),
-                timestampToInstant(rs.getTimestamp("last_seen"))), limit);
-
-        Instant now = Instant.now();
-        System.out.printf("%-10s %-20s %-28s %-13s %-13s %7s %-9s %s%n",
+        System.out.printf("%-25s %-20s %-28s %-13s %-13s %7s %-9s %s%n",
                 "LAST SEEN", "AGENT", "TARGET", "TRUST", "PERFORMANCE", "COUNT", "STATUS", "FINDING");
         System.out.println("----------------------------------------------------------------------------------------------------------------");
-        for (FindingRow row : rows) {
-            String target = row.targetHost() + ":" + row.targetPort();
-            String agent = row.displayName() == null || row.displayName().isBlank() ? row.agentId() : row.displayName();
-            System.out.printf("%-10s %-20s %-28s %-13s %-13s %7d %-9s %s%n",
-                    relativeAge(row.lastSeen(), now),
-                    trim(agent, 20),
-                    trim(target, 28),
-                    trim(row.trustVerdict(), 13),
-                    trim(row.performanceVerdict(), 13),
-                    row.occurrenceCount(),
+        for (FindingQueryService.Finding row : rows) {
+            System.out.printf("%-25s %-20s %-28s %-13s %-13s %7d %-9s %s%n",
+                    row.lastSeen() == null ? "-" : row.lastSeen().toString(),
+                    trim(row.agentName(), 20),
+                    trim(row.subject(), 28),
+                    trim(valueOrDash(row.trust()), 13),
+                    trim(valueOrDash(row.performance()), 13),
+                    row.count(),
                     trim(row.status(), 9),
-                    row.findingId());
+                    row.id());
         }
         if (rows.isEmpty()) System.out.println("(no findings)");
     }
@@ -245,10 +230,4 @@ public class CoordinatorCliRunner implements ApplicationRunner {
                                Instant lastSeenAt, String heartbeatPayload, String agentVersion,
                                String agentBuildId, String agentOs, String agentArch) {}
 
-    private record FindingTotals(long total, long active, long suspicious) {}
-
-    private record FindingRow(String findingId, String agentId, String displayName,
-                              String targetHost, int targetPort, String trustVerdict,
-                              String performanceVerdict, long occurrenceCount,
-                              String status, Instant lastSeen) {}
 }

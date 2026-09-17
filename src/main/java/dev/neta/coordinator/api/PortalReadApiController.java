@@ -2,6 +2,7 @@ package dev.neta.coordinator.api;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.neta.coordinator.finding.FindingQueryService;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -23,30 +24,15 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/v1")
 public class PortalReadApiController {
     private static final int MAX_LIMIT = 100;
-    private static final long MAX_FINDING_AGE_SECONDS = 10L * 365 * 24 * 60 * 60;
-    private static final String FINDING_ASSESSMENT_SQL = """
-            CASE
-              WHEN upper(COALESCE(f.subject_type,''))='PROCESS' THEN 'BEHAVIORAL_PATTERN'
-              WHEN upper(COALESCE(NULLIF(f.rule_id,''),
-                   (SELECT trim(substr(entry,length('Finding type:')+1))
-                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
-                     WHERE lower(entry) LIKE 'finding type:%' LIMIT 1),
-                   CASE WHEN f.finding_id LIKE 'FINDING-BEHAVIOR-%' THEN 'BEHAVIOR'
-                        WHEN f.finding_id LIKE 'FINDING-TRANSFER-%' THEN 'TRANSFER_BEHAVIOR'
-                        ELSE 'CONNECTION_ASSURANCE' END))='CONNECTION_ASSURANCE'
-                THEN 'PEER_' || COALESCE(NULLIF(upper(f.trust_verdict),''),'UNKNOWN')
-              ELSE 'INTENT_' || COALESCE(NULLIF(upper(
-                   (SELECT trim(substr(entry,length('Malicious intent:')+1))
-                      FROM jsonb_array_elements_text(COALESCE(f.changes,'[]'::jsonb)) entry
-                     WHERE lower(entry) LIKE 'malicious intent:%' LIMIT 1)),''),'UNKNOWN')
-            END
-            """;
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private final FindingQueryService findingQueries;
 
-    public PortalReadApiController(JdbcTemplate jdbc, ObjectMapper mapper) {
+    public PortalReadApiController(JdbcTemplate jdbc, ObjectMapper mapper,
+                                   FindingQueryService findingQueries) {
         this.jdbc = jdbc;
         this.mapper = mapper;
+        this.findingQueries = findingQueries;
     }
 
     @GetMapping("/fleet/summary")
@@ -58,13 +44,10 @@ public class PortalReadApiController {
                        count(*) FILTER (WHERE lower(COALESCE(agent_os,'')) LIKE 'windows%') windows
                 FROM agents
                 """, (rs,n) -> new AgentCounts(rs.getLong("total"), rs.getLong("online"), rs.getLong("linux"), rs.getLong("windows")));
-        FindingCounts findings = jdbc.queryForObject("""
-                SELECT count(*) total,
-                       count(*) FILTER (WHERE status='ACTIVE') active,
-                       count(*) FILTER (WHERE upper(COALESCE(trust_verdict,''))='SUSPICIOUS') suspicious,
-                       count(*) FILTER (WHERE upper(COALESCE(trust_verdict,''))='CHANGED') changed
-                FROM findings
-                """, (rs,n) -> new FindingCounts(rs.getLong("total"), rs.getLong("active"), rs.getLong("suspicious"), rs.getLong("changed")));
+        FindingQueryService.Summary findingSummary = findingQueries.summary();
+        FindingCounts findings = new FindingCounts(findingSummary.retained(),
+                findingSummary.currentActionable(), findingSummary.activeHistorical(),
+                findingSummary.recentCandidates());
         CertificateCounts certificates = jdbc.queryForObject("""
                 SELECT
                   count(*) FILTER (WHERE status='ACTIVE' AND certificate_not_after > now() + interval '30 days') valid,
@@ -75,7 +58,6 @@ public class PortalReadApiController {
                 FROM agents
                 """, (rs,n) -> new CertificateCounts(rs.getLong("valid"), rs.getLong("expiring"), rs.getLong("critical"), rs.getLong("expired"), rs.getLong("unknown")));
         if (agents == null) agents = new AgentCounts(0,0,0,0);
-        if (findings == null) findings = new FindingCounts(0,0,0,0);
         if (certificates == null) certificates = new CertificateCounts(0,0,0,0,0);
         return new FleetSummary(
                 new FleetAgents(agents.total(), agents.online(), Math.max(0, agents.total()-agents.online()), agents.linux(), agents.windows()),
@@ -133,7 +115,7 @@ public class PortalReadApiController {
     }
 
     @GetMapping("/findings")
-    public Page<FindingItem> findings(@RequestParam(defaultValue="50") int limit,
+    public FindingPage findings(@RequestParam(defaultValue="50") int limit,
                                       @RequestParam(required=false) String cursor,
                                       @RequestParam(required=false) String agent,
                                       @RequestParam(required=false) String trust,
@@ -145,42 +127,22 @@ public class PortalReadApiController {
                                       @RequestParam(required=false) String assessment,
                                       @RequestParam(required=false) Long olderThanSeconds,
                                       @RequestParam(required=false) Long newerThanSeconds) {
-        validateFindingAge(olderThanSeconds, newerThanSeconds);
         int bounded = bounded(limit);
-        List<Object> args = new ArrayList<>();
-        StringBuilder where = new StringBuilder(" WHERE 1=1");
-        if (text(agent)) { where.append(" AND (f.agent_id=? OR lower(COALESCE(a.display_name,''))=lower(?))"); args.add(agent); args.add(agent); }
-        if (text(trust)) { where.append(" AND upper(COALESCE(f.trust_verdict,''))=upper(?)"); args.add(trust); }
-        if (text(performance)) { where.append(" AND upper(COALESCE(f.performance_verdict,''))=upper(?)"); args.add(performance); }
-        if (text(status)) { where.append(" AND upper(COALESCE(f.status,''))=upper(?)"); args.add(status); }
-        if (text(target)) { where.append(" AND lower(COALESCE(f.target_host,'') || ':' || COALESCE(f.target_port::text,''))=lower(?)"); args.add(target); }
-        if (text(severity)) { where.append(" AND upper(COALESCE(f.severity,''))=upper(?)"); args.add(severity); }
-        if (text(rule)) { where.append(" AND upper(COALESCE(f.rule_id,''))=upper(?)"); args.add(rule); }
-        if (text(assessment)) { where.append(" AND upper((").append(FINDING_ASSESSMENT_SQL).append("))=upper(?)"); args.add(assessment.trim()); }
-        if (olderThanSeconds != null) { where.append(" AND f.last_seen < now() - (? * interval '1 second')"); args.add(olderThanSeconds); }
-        if (newerThanSeconds != null) { where.append(" AND f.last_seen >= now() - (? * interval '1 second')"); args.add(newerThanSeconds); }
         Cursor c = decode(cursor);
-        if (c != null) { where.append(" AND (f.last_seen,f.finding_id) < (?,?)"); args.add(Timestamp.from(Instant.parse(c.value()))); args.add(c.id()); }
-        args.add(bounded + 1);
-        List<FindingItem> rows = jdbc.query("""
-                SELECT f.finding_id,f.agent_id,a.display_name,f.target_host,f.target_port,
-                       f.subject_type,f.subject_id,f.severity,f.rule_id,f.trust_verdict,
-                       f.performance_verdict,f.occurrence_count,f.status,f.first_seen,f.last_seen,m.incident_id,
-                       f.changes::text AS changes,f.observed_from,f.observed_to,
-                       f.evidence_root,f.rule_set::text AS rule_set
-                FROM findings f JOIN agents a ON a.agent_id=f.agent_id
-                LEFT JOIN incident_findings m ON m.finding_id=f.finding_id
-                """ + where + " ORDER BY f.last_seen DESC,f.finding_id DESC LIMIT ?",
-                (rs,n) -> findingItem(rs.getString("finding_id"), rs.getString("agent_id"), rs.getString("display_name"),
-                        rs.getString("target_host"), rs.getObject("target_port",Integer.class),
-                        rs.getString("subject_type"), rs.getString("subject_id"), rs.getString("severity"), rs.getString("rule_id"),
-                        rs.getString("trust_verdict"), rs.getString("performance_verdict"), rs.getLong("occurrence_count"),
-                        rs.getString("status"), instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")),
-                        rs.getString("incident_id"), rs.getString("changes"),
-                        instant(rs.getTimestamp("observed_from")), instant(rs.getTimestamp("observed_to")),
-                        rs.getString("evidence_root"), rs.getString("rule_set")),
-                args.toArray());
-        return page(rows, bounded, r -> encode(r.lastSeen().toString(), r.id()));
+        FindingQueryService.Page result = findingQueries.search(
+                new FindingQueryService.Filter(agent, trust, performance, status, target, severity,
+                        rule, assessment, olderThanSeconds, newerThanSeconds),
+                new FindingQueryService.PageRequest(bounded, 0, "last_seen", false,
+                        c == null ? null : Instant.parse(c.value()), c == null ? null : c.id()));
+        List<FindingItem> rows = result.items().stream().map(PortalReadApiController::findingItem).toList();
+        String next = result.hasMore() && !rows.isEmpty()
+                ? encode(rows.getLast().lastSeen().toString(), rows.getLast().id()) : null;
+        return new FindingPage(rows, next, result.matched());
+    }
+
+    @GetMapping("/findings/summary")
+    public FindingQueryService.Summary findingSummary() {
+        return findingQueries.summary();
     }
 
     @GetMapping("/findings/{findingId}")
@@ -270,8 +232,18 @@ public class PortalReadApiController {
                 : networkSubject(host, port);
         String assessment = process ? "BEHAVIORAL_PATTERN" : assessment(type,trust,intent);
         return new FindingItem(id,agentId,display(displayName,agentId),subject,subjectType,subjectId,host,port,
-                type,semanticType,severity,confidence,assessment,trust,performance,count,status,firstSeen,lastSeen,
-                incidentId,observedFrom,observedTo,evidenceRoot,parseNullable(ruleSet));
+                type,semanticType,severity,confidence,assessment,trust,performance,count,status,
+                findingQueries.classify(status,lastSeen),firstSeen,lastSeen,incidentId,
+                observedFrom,observedTo,evidenceRoot,parseNullable(ruleSet));
+    }
+
+    private static FindingItem findingItem(FindingQueryService.Finding finding) {
+        return new FindingItem(finding.id(), finding.agentId(), finding.agentName(), finding.subject(),
+                finding.subjectType(), finding.subjectId(), finding.host(), finding.port(), finding.type(),
+                finding.semanticType(), finding.severity(), finding.confidence(), finding.assessment(), finding.trust(),
+                finding.performance(), finding.count(), finding.status(), finding.population(), finding.firstSeen(),
+                finding.lastSeen(), finding.incidentId(), finding.observedFrom(), finding.observedTo(),
+                finding.evidenceRoot(), finding.ruleSet());
     }
 
     private JsonNode parseNullable(String value) {
@@ -315,17 +287,6 @@ public class PortalReadApiController {
         return port==null?host:host+":"+port;
     }
 
-    private static void validateFindingAge(Long olderThanSeconds, Long newerThanSeconds) {
-        if (olderThanSeconds != null && newerThanSeconds != null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"olderThanSeconds and newerThanSeconds are mutually exclusive");
-        }
-        Long value = olderThanSeconds != null ? olderThanSeconds : newerThanSeconds;
-        if (value != null && (value <= 0 || value > MAX_FINDING_AGE_SECONDS)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "finding age must be between 1 and " + MAX_FINDING_AGE_SECONDS + " seconds");
-        }
-    }
-
     private static String fallbackFindingType(String id){if(!text(id))return "-";if(id.startsWith("FINDING-BEHAVIOR-"))return "BEHAVIOR";if(id.startsWith("FINDING-TRANSFER-"))return "TRANSFER_BEHAVIOR";return "CONNECTION_ASSURANCE";}
     private static String formatConfidence(String confidence){if(!text(confidence)||"-".equals(confidence))return "-";try{return String.format(Locale.ROOT,"%.2f",Double.parseDouble(confidence));}catch(NumberFormatException ignored){return confidence;}}
     private static String assessment(String findingType,String trust,String maliciousIntent){String type=upper(findingType);if("CONNECTION_ASSURANCE".equals(type)){String peer=upper(trust);return "-".equals(peer)?"PEER_UNKNOWN":"PEER_"+peer;}String intent=upper(maliciousIntent);return "INTENT_"+("-".equals(intent)?"UNKNOWN":intent);}
@@ -340,14 +301,15 @@ public class PortalReadApiController {
     private static <T> Page<T> page(List<T> rows,int limit,java.util.function.Function<T,String> cursorFn){boolean more=rows.size()>limit;List<T> items=more?List.copyOf(rows.subList(0,limit)):List.copyOf(rows);String next=more&&!items.isEmpty()?cursorFn.apply(items.getLast()):null;return new Page<>(items,next);}
 
     public record Page<T>(List<T> items,String nextCursor){}
+    public record FindingPage(List<FindingItem> items,String nextCursor,long matched){}
     private record Cursor(String value,String id){}
     private record AgentCounts(long total,long online,long linux,long windows){}
     public record FleetAgents(long total,long online,long offline,long linux,long windows){}
-    public record FindingCounts(long total,long active,long suspicious,long changed){}
+    public record FindingCounts(long retained,long currentActionable,long activeHistorical,long recentCandidates){}
     public record CertificateCounts(long valid,long expiring,long critical,long expired,long unknown){}
     public record FleetSummary(FleetAgents agents,FindingCounts findings,CertificateCounts certificates){}
     public record AgentItem(String id,String name,String state,Instant lastSeen,String version,String build,String gitCommit,String os,String arch,String artifactSha256,Integer protocolVersion,Integer schemaVersion,String features,String certificateSha256,Instant enrolledAt,long lastSequence){}
-    public record FindingItem(String id,String agentId,String agentName,String subject,String subjectType,String subjectId,String host,Integer port,String type,String semanticType,String severity,String confidence,String assessment,String trust,String performance,long count,String status,Instant firstSeen,Instant lastSeen,String incidentId,Instant observedFrom,Instant observedTo,String evidenceRoot,JsonNode ruleSet){}
+    public record FindingItem(String id,String agentId,String agentName,String subject,String subjectType,String subjectId,String host,Integer port,String type,String semanticType,String severity,String confidence,String assessment,String trust,String performance,long count,String status,String population,Instant firstSeen,Instant lastSeen,String incidentId,Instant observedFrom,Instant observedTo,String evidenceRoot,JsonNode ruleSet){}
     public record CertificateItem(String agentId,String agentName,String agentStatus,String state,String fingerprint,Instant notBefore,Instant notAfter,Instant rotatedAt){}
     public record UpgradeItem(UUID id,String agentId,String fromVersion,String fromBuild,String targetVersion,String targetBuild,String status,String os,String arch,String sourceType,String sourceRef,Instant requestedAt,String failureCode,String failureMessage){}
 }

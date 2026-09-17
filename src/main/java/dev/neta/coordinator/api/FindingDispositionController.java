@@ -104,16 +104,16 @@ public class FindingDispositionController {
 
         jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?", finding.findingId());
         jdbc.update("DELETE FROM incident_findings WHERE finding_id=?", finding.findingId());
-        jdbc.update("DELETE FROM findings WHERE finding_id=?", finding.findingId());
+        jdbc.update("UPDATE findings SET status=? WHERE finding_id=?", disposition, finding.findingId());
         jdbc.update("DELETE FROM incidents i WHERE NOT EXISTS (SELECT 1 FROM incident_findings m WHERE m.incident_id=i.incident_id)");
         incidents.syncAll();
         audit(auditEvent, finding, reason, disposition, incidentIds, scope, action, feedbackId);
         if (disposition.equals("FALSE_POSITIVE")) {
             String proposal = "NONE".equals(action) ? " No detection-policy change was requested."
                     : " A " + action + " proposal was staged for " + scope + " scope; it is not active policy until explicitly approved/published.";
-            return "Marked finding " + finding.findingId() + " as FALSE_POSITIVE, retained RM3 analyst feedback, and removed it from active coordinator findings." + proposal + "\n";
+            return "Marked finding " + finding.findingId() + " as FALSE_POSITIVE, retained the finding and RM3 analyst feedback, and removed it from the active population." + proposal + "\n";
         }
-        return "Suppressed finding " + finding.findingId() + " and removed it from active coordinator findings.\n";
+        return "Suppressed finding " + finding.findingId() + " and retained it outside the active population.\n";
     }
 
     private long recordFeedback(FindingRef finding, String reason, String scope, String action) {

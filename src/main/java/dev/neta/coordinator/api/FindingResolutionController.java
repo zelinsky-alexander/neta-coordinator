@@ -61,7 +61,7 @@ public class FindingResolutionController {
         requireAdmin(suppliedToken);
         FindingRef finding = loadFinding(findingId, reason);
         List<String> incidentIds = incidentIds(finding.findingId());
-        removeActiveFinding(finding.findingId());
+        removeActiveFinding(finding.findingId(), "RESOLVED");
         audit("FINDING_DISMISSED", finding, reason, "DISMISSED", null, null, null, incidentIds);
         return "Dismissed finding " + finding.findingId()
                 + ". No suppression or detection-policy change was created; the same behavior may alert again.\n";
@@ -91,7 +91,7 @@ public class FindingResolutionController {
             stageBaselineCandidate(finding, feedbackId);
         }
 
-        removeActiveFinding(finding.findingId());
+        removeActiveFinding(finding.findingId(), "FALSE_POSITIVE");
         audit("FINDING_FALSE_POSITIVE_TUNED", finding, reason, "FALSE_POSITIVE",
                 scope, action, feedbackId, incidentIds);
 
@@ -128,10 +128,10 @@ public class FindingResolutionController {
                 (rs, n) -> rs.getString(1), findingId);
     }
 
-    private void removeActiveFinding(String findingId) {
+    private void removeActiveFinding(String findingId, String retainedStatus) {
         jdbc.update("UPDATE corroboration_requests SET finding_id=NULL WHERE finding_id=?", findingId);
         jdbc.update("DELETE FROM incident_findings WHERE finding_id=?", findingId);
-        jdbc.update("DELETE FROM findings WHERE finding_id=?", findingId);
+        jdbc.update("UPDATE findings SET status=? WHERE finding_id=?", retainedStatus, findingId);
         jdbc.update("DELETE FROM incidents i WHERE NOT EXISTS (SELECT 1 FROM incident_findings m WHERE m.incident_id=i.incident_id)");
         incidents.syncAll();
     }

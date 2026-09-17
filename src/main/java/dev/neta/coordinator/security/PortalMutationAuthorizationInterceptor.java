@@ -99,6 +99,8 @@ public class PortalMutationAuthorizationInterceptor implements HandlerIntercepto
             return new Required(PortalAuthorization.Role.OPERATOR, "FINDINGS_BULK_RESOLVE");
         if (bean == FindingBulkController.class && name.equals("purge"))
             return new Required(PortalAuthorization.Role.ADMIN, "FINDINGS_BULK_PURGE");
+        if (bean == FindingBulkController.class && name.equals("purgeOne"))
+            return new Required(PortalAuthorization.Role.ADMIN, "FINDING_PURGE");
         return null;
     }
 
