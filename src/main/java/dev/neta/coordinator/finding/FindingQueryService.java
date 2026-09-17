@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -58,6 +59,7 @@ public class FindingQueryService {
     private final Duration recentCandidateWindow;
     private final Clock clock;
 
+    @Autowired
     public FindingQueryService(JdbcTemplate jdbc, ObjectMapper mapper,
                                @Value("${NETA_FINDINGS_CURRENT_ACTIONABLE_WINDOW:PT24H}") Duration currentActionableWindow,
                                @Value("${NETA_FINDINGS_RECENT_CANDIDATE_WINDOW:PT1H}") Duration recentCandidateWindow) {
