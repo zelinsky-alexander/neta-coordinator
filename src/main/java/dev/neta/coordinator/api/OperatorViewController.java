@@ -37,27 +37,26 @@ public class OperatorViewController {
     public String endpoints() {
         Instant now = Instant.now();
         List<EndpointRow> rows = jdbc.query("""
-                SELECT agent_id, display_name, status, last_seen_at, last_heartbeat_payload::text,
-                       agent_version, agent_build_id, agent_os, agent_arch
-                FROM agents
+                SELECT a.agent_id, a.display_name, a.status, a.last_seen_at, a.last_heartbeat_payload::text,
+                       a.agent_version, a.agent_build_id, a.agent_os, a.agent_arch,
+                       (SELECT count(*) FROM findings f WHERE f.agent_id=a.agent_id) AS finding_count
+                FROM agents a
                 ORDER BY COALESCE(NULLIF(display_name, ''), agent_id)
                 """, (rs, rowNum) -> new EndpointRow(
                 rs.getString("agent_id"), rs.getString("display_name"), rs.getString("status"),
                 timestampToInstant(rs.getTimestamp("last_seen_at")), rs.getString("last_heartbeat_payload"),
                 rs.getString("agent_version"), rs.getString("agent_build_id"),
-                rs.getString("agent_os"), rs.getString("agent_arch")));
+                rs.getString("agent_os"), rs.getString("agent_arch"), rs.getLong("finding_count")));
 
         StringBuilder out = new StringBuilder();
-        out.append(String.format("%-24s %-12s %-16s %-18s %-18s %-12s %s%n",
-                "AGENT", "VERSION", "BUILD", "PLATFORM", "SITE", "STATUS", "LAST SEEN"));
+        out.append(String.format("%-24s %-12s %-16s %-18s %-10s %-12s %s%n",
+                "AGENT", "VERSION", "BUILD", "PLATFORM", "FINDINGS", "STATUS", "LAST SEEN"));
         out.append("------------------------------------------------------------------------------------------------------------------------\n");
         for (EndpointRow row : rows) {
             JsonNode heartbeat = parseJson(row.heartbeatPayload());
-            String site = firstText(heartbeat, "site", "region", "location");
-            if ("-".equals(site)) site = nestedText(heartbeat, "network", "site");
-            out.append(String.format("%-24s %-12s %-16s %-18s %-18s %-12s %s%n",
+            out.append(String.format("%-24s %-12s %-16s %-18s %-10d %-12s %s%n",
                     trim(agentName(row), 24), trim(valueRaw(row.agentVersion()), 12),
-                    trim(valueRaw(row.agentBuildId()), 16), trim(platform(row, heartbeat), 18), trim(site, 18),
+                    trim(valueRaw(row.agentBuildId()), 16), trim(platform(row, heartbeat), 18), row.findingCount(),
                     endpointStatus(row, now), relativeAge(row.lastSeenAt(), now)));
         }
         return out.toString();
@@ -92,7 +91,7 @@ public class OperatorViewController {
         String site = firstText(heartbeat, "site", "region", "location");
         if ("-".equals(site)) site = nestedText(heartbeat, "network", "site");
         EndpointRow statusRow = new EndpointRow(row.agentId(), row.displayName(), row.enrollmentStatus(), row.lastSeenAt(),
-                row.heartbeatPayload(), row.agentVersion(), row.agentBuildId(), row.agentOs(), row.agentArch());
+                row.heartbeatPayload(), row.agentVersion(), row.agentBuildId(), row.agentOs(), row.agentArch(), 0);
 
         StringBuilder out = new StringBuilder();
         line(out, "Agent", displayOrId(row.displayName(), row.agentId()));
@@ -296,7 +295,7 @@ public class OperatorViewController {
 
     private record EndpointRow(String agentId, String displayName, String enrollmentStatus, Instant lastSeenAt,
                                String heartbeatPayload, String agentVersion, String agentBuildId,
-                               String agentOs, String agentArch) {}
+                               String agentOs, String agentArch, long findingCount) {}
     private record EndpointDetail(String agentId, String fleetId, String displayName, String certificateSha256,
                                   String enrollmentStatus, long lastSequence, Instant enrolledAt, Instant lastSeenAt,
                                   String heartbeatPayload, String agentVersion, String agentBuildId, String agentGitCommit,

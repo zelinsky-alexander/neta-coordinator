@@ -85,7 +85,8 @@ public class PortalReadApiController {
         List<AgentItem> rows = jdbc.query("""
                 SELECT agent_id,display_name,status,last_seen_at,agent_version,agent_build_id,agent_git_commit,
                        agent_os,agent_arch,agent_artifact_sha256,agent_protocol_version,agent_schema_version,
-                       agent_features::text AS agent_features,certificate_sha256,enrolled_at,last_sequence
+                       agent_features::text AS agent_features,certificate_sha256,enrolled_at,last_sequence,
+                       (SELECT count(*) FROM findings f WHERE f.agent_id=agents.agent_id) AS finding_count
                 FROM agents
                 """ + where + " ORDER BY lower(COALESCE(NULLIF(display_name,''),agent_id)), agent_id LIMIT ?",
                 (rs,n) -> new AgentItem(rs.getString("agent_id"), display(rs.getString("display_name"),rs.getString("agent_id")),
@@ -93,7 +94,7 @@ public class PortalReadApiController {
                         rs.getString("agent_build_id"), rs.getString("agent_git_commit"), rs.getString("agent_os"), rs.getString("agent_arch"),
                         rs.getString("agent_artifact_sha256"), rs.getObject("agent_protocol_version",Integer.class),
                         rs.getObject("agent_schema_version",Integer.class), rs.getString("agent_features"), rs.getString("certificate_sha256"),
-                        instant(rs.getTimestamp("enrolled_at")), rs.getLong("last_sequence")), args.toArray());
+                        instant(rs.getTimestamp("enrolled_at")), rs.getLong("last_sequence"), rs.getLong("finding_count")), args.toArray());
         return page(rows, bounded, r -> encode(r.name().toLowerCase(Locale.ROOT), r.id()));
     }
 
@@ -102,13 +103,14 @@ public class PortalReadApiController {
         List<AgentItem> rows = jdbc.query("""
                 SELECT agent_id,display_name,status,last_seen_at,agent_version,agent_build_id,agent_git_commit,
                        agent_os,agent_arch,agent_artifact_sha256,agent_protocol_version,agent_schema_version,
-                       agent_features::text AS agent_features,certificate_sha256,enrolled_at,last_sequence
+                       agent_features::text AS agent_features,certificate_sha256,enrolled_at,last_sequence,
+                       (SELECT count(*) FROM findings f WHERE f.agent_id=agents.agent_id) AS finding_count
                 FROM agents WHERE agent_id=? OR display_name=? ORDER BY CASE WHEN agent_id=? THEN 0 ELSE 1 END LIMIT 1
                 """, (rs,n) -> new AgentItem(rs.getString("agent_id"), display(rs.getString("display_name"),rs.getString("agent_id")),
                         rs.getString("status"), instant(rs.getTimestamp("last_seen_at")), rs.getString("agent_version"), rs.getString("agent_build_id"),
                         rs.getString("agent_git_commit"), rs.getString("agent_os"), rs.getString("agent_arch"), rs.getString("agent_artifact_sha256"),
                         rs.getObject("agent_protocol_version",Integer.class), rs.getObject("agent_schema_version",Integer.class),
-                        rs.getString("agent_features"), rs.getString("certificate_sha256"), instant(rs.getTimestamp("enrolled_at")), rs.getLong("last_sequence")),
+                        rs.getString("agent_features"), rs.getString("certificate_sha256"), instant(rs.getTimestamp("enrolled_at")), rs.getLong("last_sequence"), rs.getLong("finding_count")),
                 agentId, agentId, agentId);
         if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"agent not found");
         return rows.getFirst();
@@ -308,7 +310,7 @@ public class PortalReadApiController {
     public record FindingCounts(long retained,long currentActionable,long activeHistorical,long recentCandidates){}
     public record CertificateCounts(long valid,long expiring,long critical,long expired,long unknown){}
     public record FleetSummary(FleetAgents agents,FindingCounts findings,CertificateCounts certificates){}
-    public record AgentItem(String id,String name,String state,Instant lastSeen,String version,String build,String gitCommit,String os,String arch,String artifactSha256,Integer protocolVersion,Integer schemaVersion,String features,String certificateSha256,Instant enrolledAt,long lastSequence){}
+    public record AgentItem(String id,String name,String state,Instant lastSeen,String version,String build,String gitCommit,String os,String arch,String artifactSha256,Integer protocolVersion,Integer schemaVersion,String features,String certificateSha256,Instant enrolledAt,long lastSequence,long findingCount){}
     public record FindingItem(String id,String agentId,String agentName,String subject,String subjectType,String subjectId,String host,Integer port,String type,String semanticType,String severity,String confidence,String assessment,String trust,String performance,long count,String status,String population,Instant firstSeen,Instant lastSeen,String incidentId,Instant observedFrom,Instant observedTo,String evidenceRoot,JsonNode ruleSet){}
     public record CertificateItem(String agentId,String agentName,String agentStatus,String state,String fingerprint,Instant notBefore,Instant notAfter,Instant rotatedAt){}
     public record UpgradeItem(UUID id,String agentId,String fromVersion,String fromBuild,String targetVersion,String targetBuild,String status,String os,String arch,String sourceType,String sourceRef,Instant requestedAt,String failureCode,String failureMessage){}

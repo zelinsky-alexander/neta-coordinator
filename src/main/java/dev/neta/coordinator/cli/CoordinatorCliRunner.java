@@ -56,9 +56,10 @@ public class CoordinatorCliRunner implements ApplicationRunner {
     private void printEndpoints() {
         Instant now = Instant.now();
         List<EndpointRow> rows = jdbc.query("""
-                SELECT agent_id, display_name, status, last_seen_at, last_heartbeat_payload::text,
-                       agent_version, agent_build_id, agent_os, agent_arch
-                FROM agents
+                SELECT a.agent_id, a.display_name, a.status, a.last_seen_at, a.last_heartbeat_payload::text,
+                       a.agent_version, a.agent_build_id, a.agent_os, a.agent_arch,
+                       (SELECT count(*) FROM findings f WHERE f.agent_id=a.agent_id) AS finding_count
+                FROM agents a
                 ORDER BY COALESCE(NULLIF(display_name, ''), agent_id)
                 """, (rs, rowNum) -> new EndpointRow(
                 rs.getString("agent_id"),
@@ -69,23 +70,22 @@ public class CoordinatorCliRunner implements ApplicationRunner {
                 rs.getString("agent_version"),
                 rs.getString("agent_build_id"),
                 rs.getString("agent_os"),
-                rs.getString("agent_arch")));
+                rs.getString("agent_arch"),
+                rs.getLong("finding_count")));
 
-        System.out.printf("%-24s %-12s %-16s %-18s %-18s %-10s %s%n",
-                "AGENT", "VERSION", "BUILD", "PLATFORM", "SITE", "STATUS", "LAST SEEN");
+        System.out.printf("%-24s %-12s %-16s %-18s %-10s %-10s %s%n",
+                "AGENT", "VERSION", "BUILD", "PLATFORM", "FINDINGS", "STATUS", "LAST SEEN");
         System.out.println("--------------------------------------------------------------------------------------------------------------------");
         for (EndpointRow row : rows) {
             JsonNode heartbeat = parseJson(row.heartbeatPayload());
             String platform = platform(row, heartbeat);
-            String site = firstText(heartbeat, "site", "region", "location");
-            if ("-".equals(site)) site = nestedText(heartbeat, "network", "site");
 
-            System.out.printf("%-24s %-12s %-16s %-18s %-18s %-10s %s%n",
+            System.out.printf("%-24s %-12s %-16s %-18s %-10d %-10s %s%n",
                     trim(agentName(row), 24),
                     trim(valueOrDashRaw(row.agentVersion()), 12),
                     trim(valueOrDashRaw(row.agentBuildId()), 16),
                     trim(platform, 18),
-                    trim(site, 18),
+                    row.findingCount(),
                     endpointStatus(row, now),
                     relativeAge(row.lastSeenAt(), now));
         }
@@ -228,6 +228,6 @@ public class CoordinatorCliRunner implements ApplicationRunner {
 
     private record EndpointRow(String agentId, String displayName, String enrollmentStatus,
                                Instant lastSeenAt, String heartbeatPayload, String agentVersion,
-                               String agentBuildId, String agentOs, String agentArch) {}
+                               String agentBuildId, String agentOs, String agentArch, long findingCount) {}
 
 }
