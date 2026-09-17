@@ -25,7 +25,8 @@ public class IncidentOperatorController {
     private final CoordinatorProperties properties;
     private final IncidentService incidents;
 
-    public IncidentOperatorController(JdbcTemplate jdbc, CoordinatorProperties properties, IncidentService incidents) {
+    public IncidentOperatorController(
+            JdbcTemplate jdbc, CoordinatorProperties properties, IncidentService incidents) {
         this.jdbc = jdbc;
         this.properties = properties;
         this.incidents = incidents;
@@ -59,13 +60,19 @@ public class IncidentOperatorController {
                 """, (rs, n) -> new Counts(rs.getLong("total"), rs.getLong("active"),
                 rs.getLong("suspicious"), rs.getLong("changed")));
         IncidentCounts incidentCounts = jdbc.queryForObject("""
-                SELECT count(*) total, count(*) FILTER (WHERE status='OPEN') open
+                SELECT count(*) total,
+                       count(*) FILTER (WHERE population='CURRENT_ACTIONABLE') current_actionable,
+                       count(*) FILTER (WHERE population='ACTIVE_HISTORICAL') active_historical,
+                       count(*) FILTER (WHERE population='CANDIDATE_ONLY') candidate_only
                 FROM incidents
-                """, (rs, n) -> new IncidentCounts(rs.getLong("total"), rs.getLong("open")));
-        Instant lastIngestion = jdbc.queryForObject("SELECT max(last_seen_at) FROM agents", (rs, n) -> instant(rs.getTimestamp(1)));
+                """, (rs, n) -> new IncidentCounts(
+                rs.getLong("total"), rs.getLong("current_actionable"),
+                rs.getLong("active_historical"), rs.getLong("candidate_only")));
+        Instant lastIngestion = jdbc.queryForObject(
+                "SELECT max(last_seen_at) FROM agents", (rs, n) -> instant(rs.getTimestamp(1)));
 
         if (findings == null) findings = new Counts(0, 0, 0, 0);
-        if (incidentCounts == null) incidentCounts = new IncidentCounts(0, 0);
+        if (incidentCounts == null) incidentCounts = new IncidentCounts(0, 0, 0, 0);
 
         StringBuilder out = new StringBuilder();
         out.append("NETA Fleet\n");
@@ -83,39 +90,47 @@ public class IncidentOperatorController {
         out.append(String.format("  Changed        %d%n", findings.changed()));
         out.append('\n');
         out.append(String.format("Incidents        %d%n", incidentCounts.total()));
-        out.append(String.format("  Open           %d%n", incidentCounts.open()));
+        out.append(String.format("  Current actionable %d%n", incidentCounts.currentActionable()));
+        out.append(String.format("  Active historical  %d%n", incidentCounts.activeHistorical()));
+        out.append(String.format("  Candidate-only     %d%n", incidentCounts.candidateOnly()));
         out.append(String.format("Grouping window  %s%n", IncidentService.GROUPING_WINDOW));
         out.append('\n');
-        out.append(String.format("Last ingestion   %s%n", lastIngestion == null ? "never" : relativeAge(lastIngestion, now)));
-        out.append(String.format("Coordinator      %s%n", properties.security().requireClientCertificate() ? "HEALTHY / mTLS" : "HEALTHY / non-mTLS"));
+        out.append(String.format("Last ingestion   %s%n",
+                lastIngestion == null ? "never" : relativeAge(lastIngestion, now)));
+        out.append(String.format("Coordinator      %s%n",
+                properties.security().requireClientCertificate()
+                        ? "HEALTHY / mTLS" : "HEALTHY / non-mTLS"));
         return out.toString();
     }
 
     @GetMapping(value = "/incidents", produces = MediaType.TEXT_PLAIN_VALUE)
-    public String incidents(@RequestParam(defaultValue = "20") int limit) {
+    public String incidents(
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestParam(defaultValue = "CURRENT_ACTIONABLE") String population) {
         this.incidents.syncAll();
         int bounded = Math.max(1, Math.min(limit, MAX_INCIDENT_LIMIT));
+        String normalized;
+        try {
+            normalized = IncidentService.normalizePopulation(population);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
         Instant now = Instant.now();
-        List<IncidentRow> rows = jdbc.query("""
-                SELECT i.incident_id,i.status,i.agent_id,a.display_name,i.target_host,i.target_port,
-                       i.first_seen,i.last_seen,i.finding_count,i.suspicious_count,i.changed_count
-                FROM incidents i JOIN agents a ON a.agent_id=i.agent_id
-                ORDER BY i.last_seen DESC LIMIT ?
-                """, (rs, n) -> new IncidentRow(
-                rs.getString("incident_id"), rs.getString("status"), rs.getString("agent_id"),
-                rs.getString("display_name"), rs.getString("target_host"), rs.getInt("target_port"),
-                instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")),
-                rs.getInt("finding_count"), rs.getInt("suspicious_count"), rs.getInt("changed_count")), bounded);
+        List<IncidentRow> rows = queryIncidents(normalized, bounded);
 
         StringBuilder out = new StringBuilder();
-        out.append(String.format("%-10s %-8s %-22s %-30s %8s %5s %7s %s%n",
-                "LAST SEEN", "STATUS", "AGENT", "TARGET", "FINDINGS", "SUSP", "CHANGED", "INCIDENT"));
-        out.append("--------------------------------------------------------------------------------------------------------------------------\n");
+        out.append(String.format("Incidents matched: %d  population: %s%n%n",
+                matchedIncidents(normalized), normalized));
+        out.append(String.format("%-10s %-8s %-20s %-22s %-30s %8s %5s %7s %s%n",
+                "LAST SEEN", "STATUS", "POPULATION", "AGENT", "TARGET",
+                "FINDINGS", "SUSP", "CHANGED", "INCIDENT"));
+        out.append("------------------------------------------------------------------------------------------------------------------------------------------------\n");
         for (IncidentRow row : rows) {
-            out.append(String.format("%-10s %-8s %-22s %-30s %8d %5d %7d %s%n",
-                    relativeAge(row.lastSeen(), now), value(row.status()), trim(displayOrId(row.displayName(), row.agentId()), 22),
-                    trim(row.targetHost() + ":" + row.targetPort(), 30), row.findingCount(), row.suspiciousCount(),
-                    row.changedCount(), row.incidentId()));
+            out.append(String.format("%-10s %-8s %-20s %-22s %-30s %8d %5d %7d %s%n",
+                    relativeAge(row.lastSeen(), now), value(row.status()), value(row.population()),
+                    trim(displayOrId(row.displayName(), row.agentId()), 22),
+                    trim(row.targetHost() + ":" + row.targetPort(), 30), row.findingCount(),
+                    row.suspiciousCount(), row.changedCount(), row.incidentId()));
         }
         return out.toString();
     }
@@ -124,16 +139,15 @@ public class IncidentOperatorController {
     public String incident(@RequestParam("id") String id) {
         incidents.syncAll();
         List<IncidentRow> rows = jdbc.query("""
-                SELECT i.incident_id,i.status,i.agent_id,a.display_name,i.target_host,i.target_port,
-                       i.first_seen,i.last_seen,i.finding_count,i.suspicious_count,i.changed_count
+                SELECT i.incident_id,i.status,i.population,i.agent_id,a.display_name,
+                       i.target_host,i.target_port,i.first_seen,i.last_seen,i.finding_count,
+                       i.suspicious_count,i.changed_count
                 FROM incidents i JOIN agents a ON a.agent_id=i.agent_id
                 WHERE i.incident_id=?
-                """, (rs, n) -> new IncidentRow(
-                rs.getString("incident_id"), rs.getString("status"), rs.getString("agent_id"),
-                rs.getString("display_name"), rs.getString("target_host"), rs.getInt("target_port"),
-                instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")),
-                rs.getInt("finding_count"), rs.getInt("suspicious_count"), rs.getInt("changed_count")), id);
-        if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "incident not found");
+                """, incidentMapper(), id);
+        if (rows.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "incident not found");
+        }
         IncidentRow row = rows.getFirst();
 
         List<IncidentFinding> findings = jdbc.query("""
@@ -142,13 +156,15 @@ public class IncidentOperatorController {
                 FROM incident_findings m JOIN findings f ON f.finding_id=m.finding_id
                 WHERE m.incident_id=? ORDER BY f.first_seen,f.finding_id
                 """, (rs, n) -> new IncidentFinding(
-                rs.getString("finding_id"), instant(rs.getTimestamp("first_seen")), instant(rs.getTimestamp("last_seen")),
-                rs.getString("trust_verdict"), rs.getString("performance_verdict"), rs.getLong("occurrence_count"),
+                rs.getString("finding_id"), instant(rs.getTimestamp("first_seen")),
+                instant(rs.getTimestamp("last_seen")), rs.getString("trust_verdict"),
+                rs.getString("performance_verdict"), rs.getLong("occurrence_count"),
                 rs.getString("status")), id);
 
         StringBuilder out = new StringBuilder();
         line(out, "Incident", row.incidentId());
         line(out, "Status", value(row.status()));
+        line(out, "Population", value(row.population()));
         line(out, "Agent", displayOrId(row.displayName(), row.agentId()) + " (" + row.agentId() + ")");
         line(out, "Target", row.targetHost() + ":" + row.targetPort());
         line(out, "First seen", row.firstSeen().toString());
@@ -164,10 +180,45 @@ public class IncidentOperatorController {
         Instant now = Instant.now();
         for (IncidentFinding finding : findings) {
             out.append(String.format("%-10s %-14s %-22s %5d %-9s %s%n",
-                    relativeAge(finding.lastSeen(), now), value(finding.trustVerdict()), value(finding.performanceVerdict()),
-                    finding.occurrenceCount(), value(finding.status()), finding.findingId()));
+                    relativeAge(finding.lastSeen(), now), value(finding.trustVerdict()),
+                    value(finding.performanceVerdict()), finding.occurrenceCount(),
+                    value(finding.status()), finding.findingId()));
         }
         return out.toString();
+    }
+
+    private List<IncidentRow> queryIncidents(String population, int limit) {
+        String select = """
+                SELECT i.incident_id,i.status,i.population,i.agent_id,a.display_name,
+                       i.target_host,i.target_port,i.first_seen,i.last_seen,i.finding_count,
+                       i.suspicious_count,i.changed_count
+                FROM incidents i JOIN agents a ON a.agent_id=i.agent_id
+                """;
+        if (IncidentService.ALL.equals(population)) {
+            return jdbc.query(select + " ORDER BY i.last_seen DESC LIMIT ?", incidentMapper(), limit);
+        }
+        return jdbc.query(select + " WHERE i.population=? ORDER BY i.last_seen DESC LIMIT ?",
+                incidentMapper(), population, limit);
+    }
+
+    private long matchedIncidents(String population) {
+        Long value;
+        if (IncidentService.ALL.equals(population)) {
+            value = jdbc.queryForObject("SELECT count(*) FROM incidents", Long.class);
+        } else {
+            value = jdbc.queryForObject(
+                    "SELECT count(*) FROM incidents WHERE population=?", Long.class, population);
+        }
+        return value == null ? 0 : value;
+    }
+
+    private org.springframework.jdbc.core.RowMapper<IncidentRow> incidentMapper() {
+        return (rs, n) -> new IncidentRow(
+                rs.getString("incident_id"), rs.getString("status"), rs.getString("population"),
+                rs.getString("agent_id"), rs.getString("display_name"), rs.getString("target_host"),
+                rs.getInt("target_port"), instant(rs.getTimestamp("first_seen")),
+                instant(rs.getTimestamp("last_seen")), rs.getInt("finding_count"),
+                rs.getInt("suspicious_count"), rs.getInt("changed_count"));
     }
 
     private String liveness(AgentSeen agent, Instant now) {
@@ -183,10 +234,21 @@ public class IncidentOperatorController {
         out.append(String.format("%-18s %s%n", label + ":", value));
     }
 
-    private static Instant instant(Timestamp timestamp) { return timestamp == null ? null : timestamp.toInstant(); }
-    private static String displayOrId(String displayName, String id) { return displayName == null || displayName.isBlank() ? id : displayName; }
-    private static String value(String text) { return text == null || text.isBlank() ? "-" : text.toUpperCase(Locale.ROOT); }
-    private static String trim(String text, int width) { return text.length() <= width ? text : text.substring(0, width - 1) + "…"; }
+    private static Instant instant(Timestamp timestamp) {
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private static String displayOrId(String displayName, String id) {
+        return displayName == null || displayName.isBlank() ? id : displayName;
+    }
+
+    private static String value(String text) {
+        return text == null || text.isBlank() ? "-" : text.toUpperCase(Locale.ROOT);
+    }
+
+    private static String trim(String text, int width) {
+        return text.length() <= width ? text : text.substring(0, width - 1) + "…";
+    }
 
     private static String relativeAge(Instant then, Instant now) {
         if (then == null) return "never";
@@ -201,10 +263,13 @@ public class IncidentOperatorController {
 
     private record AgentSeen(String enrollmentStatus, Instant lastSeen) {}
     private record Counts(long total, long active, long suspicious, long changed) {}
-    private record IncidentCounts(long total, long open) {}
-    private record IncidentRow(String incidentId, String status, String agentId, String displayName,
-                               String targetHost, int targetPort, Instant firstSeen, Instant lastSeen,
-                               int findingCount, int suspiciousCount, int changedCount) {}
+    private record IncidentCounts(long total, long currentActionable,
+                                  long activeHistorical, long candidateOnly) {}
+    private record IncidentRow(String incidentId, String status, String population,
+                               String agentId, String displayName, String targetHost, int targetPort,
+                               Instant firstSeen, Instant lastSeen, int findingCount,
+                               int suspiciousCount, int changedCount) {}
     private record IncidentFinding(String findingId, Instant firstSeen, Instant lastSeen,
-                                   String trustVerdict, String performanceVerdict, long occurrenceCount, String status) {}
+                                   String trustVerdict, String performanceVerdict,
+                                   long occurrenceCount, String status) {}
 }
