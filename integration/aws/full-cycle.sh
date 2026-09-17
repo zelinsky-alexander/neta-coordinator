@@ -216,6 +216,10 @@ set -e
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.tsv "$OUT/lab/summary.tsv" || true
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/summary.json "$OUT/lab/summary.json" || true
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/contracts.json "$OUT/lab/contracts.json" || true
+mkdir -p "$OUT/lab/logs"
+if ! ssh_host "$AGENT_PUBLIC_IP" "sudo test -d /opt/neta-acceptance/lab-results/logs && sudo tar -C /opt/neta-acceptance/lab-results -cf - logs" | tar -C "$OUT/lab" -xf -; then
+  log "warning: per-scenario lab logs were unavailable"
+fi
 
 run_peer_scenario() {
   local id="$1" agent_cmd="$2" peer_cmd="$3" delay="${4:-1}"
@@ -259,7 +263,7 @@ ssh_host "$COORDINATOR_PUBLIC_IP" "cd /opt/neta-acceptance/src/portal && sudo ba
 
 log "collecting and comparing lab evidence, findings and Portal visibility"
 scp_to "$SCRIPT_ROOT/remote/collect-agent-lab-evidence.py" "$AGENT_PUBLIC_IP" /tmp/collect-agent-lab-evidence.py
-ssh_host "$AGENT_PUBLIC_IP" "sudo python3 /tmp/collect-agent-lab-evidence.py --database /var/lib/neta/neta.db --contracts /opt/neta-acceptance/lab-results/contracts.json --output /opt/neta-acceptance/lab-results/agent-evidence.json"
+ssh_host "$AGENT_PUBLIC_IP" "sudo python3 /tmp/collect-agent-lab-evidence.py --database /var/lib/neta/neta.db --state-dir /var/lib/neta/identity --contracts /opt/neta-acceptance/lab-results/contracts.json --output /opt/neta-acceptance/lab-results/agent-evidence.json"
 scp_from "$AGENT_PUBLIC_IP" /opt/neta-acceptance/lab-results/agent-evidence.json "$OUT/lab/agent-evidence.json"
 
 ssh_host "$COORDINATOR_PUBLIC_IP" "sudo curl -fsS --cacert /opt/neta-acceptance/pki/fleet-ca.crt --cert /opt/neta-acceptance/pki/portal-client.crt --key /opt/neta-acceptance/pki/portal-client.key -H 'X-NETA-Portal-Service-Token: $PORTAL_SERVICE_TOKEN' -H 'X-NETA-Portal-Service: neta-acceptance' -H 'X-NETA-Actor: acceptance' -H 'X-NETA-Actor-Role: ADMIN' 'https://127.0.0.1:8443/api/v1/findings?limit=100'" >"$OUT/lab/coordinator-findings.json"
@@ -375,6 +379,14 @@ root=pathlib.Path(sys.argv[1]); status=sys.argv[2]
 result={"result":status,"files":sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())}
 (root/'acceptance.json').write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
 PY
+
+python3 "$SCRIPT_ROOT/write_full_cycle_job_summary.py" \
+  --output "$OUT/job-summary.md" --status "$STATUS" \
+  --lab-rc "$LAB_RC" --peer-rc "$PEER_RC" --security-rc "$SECURITY_RC" \
+  --acceptance-rc "$ACCEPTANCE_RC" --matrix "$OUT/lab/expected-vs-actual.tsv"
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  cat "$OUT/job-summary.md" >>"$GITHUB_STEP_SUMMARY"
+fi
 
 cat >"$OUT/junit.xml" <<EOF2
 <?xml version="1.0" encoding="UTF-8"?>
